@@ -26,11 +26,14 @@ namespace openlcb
 /// - the ACDI memory space will contain this data.
 extern const SimpleNodeStaticValues SNIP_STATIC_DATA = {
     4,               "OpenMRN", "OpenLCB DevKit + Nucleo dev board",
-    "Rev A", "1.02"};
+    "Rev A", "1.06"};
 
 #define NUM_OUTPUTS 16
 #define NUM_INPUTS 1
-#define NUM_EXTBOARDS 0
+// NUM_MCPIOs reflect the number of I2C connected MCP IO Expander chips. Note that the maximum number is 
+// 8, based on their number of addressing bits. Standard DevKit Expansion has 2 MCPs. The Big DevKit
+// expansion board has 4 MCPs.
+#define NUM_MCPIOS 0
 
 // Snap switches and LED lights conflict on same port. When GPIO pin has
 // snap configuration in place, LED will quickly flash on consumer event recv and
@@ -59,7 +62,15 @@ using PortABProducers = RepeatedGroup<ProducerConfig, 16>;
 using PulseConsumers = RepeatedGroup<PulseConsumerConfig, 8>;
 using ServoConsumers = RepeatedGroup<ServoConsumerConfig, 4>;
 
+#if NUM_MCPIOS == 2
 using Ext0PC = RepeatedGroup<PCConfig, 32>;
+#elif NUM_MCPIOS == 4
+using Ext0PC = RepeatedGroup<PCConfig, 64>;
+#elif NUM_MCPIOS == 6
+using Ext0PC = RepeatedGroup<PCConfig, 96>;
+#elif NUM_MCPIOS == 8
+using Ext0PC = RepeatedGroup<PCConfig, 128>;
+#endif
 
 /// Modify this value every time the EEPROM needs to be cleared on the node
 /// after an update.
@@ -90,7 +101,9 @@ CDI_GROUP_ENTRY(portde_consumers, PortDEConsumers, Name("Port D/E outputs"), Des
 CDI_GROUP_ENTRY(portab_producers, PortABProducers, Name("Port A/B inputs"), Description("Line 1-8 is port A, Line 9-16 is port B"), RepName("Line"));
 CDI_GROUP_ENTRY(ext0_pc, Ext0PC, Name("Expansion board 0 lines"),
     Description("Line 1-8 is port Even/A, Line 9-16 is port Even/B, Line 17-24 "
-                "is Odd/A, Line 25-32 is Odd/B"),
+                "is Odd/A, Line 25-32 is Odd/B. Additional lines are grouped "
+		"by 16 lines, following the same paradigm of even/odd. "
+		),
     RepName("Line"));
 CDI_GROUP_END();
 
