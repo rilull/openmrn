@@ -301,16 +301,20 @@ constexpr const MmapGpio PORTE_LINE7(output_register, 9, true);
 constexpr const MmapGpio PORTE_LINE8(output_register, 8, true);
 
 
-constexpr const Gpio *const kPortDEGpio[] = {
+constexpr const Gpio *const kPortDGpio[] = {
     &PORTD_LINE1, &PORTD_LINE2, &PORTD_LINE3, &PORTD_LINE4, //
     &PORTD_LINE5, &PORTD_LINE6, &PORTD_LINE7, &PORTD_LINE8, //
+};
+
+constexpr const Gpio *const kPortEGpio[] = {
     &PORTE_LINE1, &PORTE_LINE2, &PORTE_LINE3, &PORTE_LINE4, //
     &PORTE_LINE5, &PORTE_LINE6, &PORTE_LINE7, &PORTE_LINE8  //
 };
 
-openlcb::MultiConfiguredConsumer portde_consumers(stack.node(), kPortDEGpio,
-    ARRAYSIZE(kPortDEGpio), cfg.seg().portde_consumers());
-
+openlcb::MultiConfiguredConsumer left_consumers(stack.node(), kPortDGpio,
+    ARRAYSIZE(kPortDGpio), cfg.seg().left_consumers());
+openlcb::MultiConfiguredConsumer right_consumers(stack.node(), kPortEGpio,
+    ARRAYSIZE(kPortDGpio), cfg.seg().right_consumers());
 
 uint32_t input_register[2] = {0};
 
@@ -336,39 +340,39 @@ constexpr const MmapGpio PORTA_LINE8(input_register, 15, false);
 
 // Similar syntax for the producers.
 openlcb::ConfiguredProducer producer_a1(
-    stack.node(), cfg.seg().portab_producers().entry<0>(), (const Gpio*)&PORTA_LINE1);
+    stack.node(), cfg.seg().left_producers().entry<0>(), (const Gpio*)&PORTA_LINE1);
 openlcb::ConfiguredProducer producer_a2(
-    stack.node(), cfg.seg().portab_producers().entry<1>(), (const Gpio*)&PORTA_LINE2);
+    stack.node(), cfg.seg().left_producers().entry<1>(), (const Gpio*)&PORTA_LINE2);
 openlcb::ConfiguredProducer producer_a3(
-    stack.node(), cfg.seg().portab_producers().entry<2>(), (const Gpio*)&PORTA_LINE3);
+    stack.node(), cfg.seg().left_producers().entry<2>(), (const Gpio*)&PORTA_LINE3);
 openlcb::ConfiguredProducer producer_a4(
-    stack.node(), cfg.seg().portab_producers().entry<3>(), (const Gpio*)&PORTA_LINE4);
+    stack.node(), cfg.seg().left_producers().entry<3>(), (const Gpio*)&PORTA_LINE4);
 openlcb::ConfiguredProducer producer_a5(
-    stack.node(), cfg.seg().portab_producers().entry<4>(), (const Gpio*)&PORTA_LINE5);
+    stack.node(), cfg.seg().left_producers().entry<4>(), (const Gpio*)&PORTA_LINE5);
 openlcb::ConfiguredProducer producer_a6(
-    stack.node(), cfg.seg().portab_producers().entry<5>(), (const Gpio*)&PORTA_LINE6);
+    stack.node(), cfg.seg().left_producers().entry<5>(), (const Gpio*)&PORTA_LINE6);
 openlcb::ConfiguredProducer producer_a7(
-    stack.node(), cfg.seg().portab_producers().entry<6>(), (const Gpio*)&PORTA_LINE7);
+    stack.node(), cfg.seg().left_producers().entry<6>(), (const Gpio*)&PORTA_LINE7);
 openlcb::ConfiguredProducer producer_a8(
-    stack.node(), cfg.seg().portab_producers().entry<7>(), (const Gpio*)&PORTA_LINE8);
+    stack.node(), cfg.seg().left_producers().entry<7>(), (const Gpio*)&PORTA_LINE8);
 
 // Similar syntax for the producers.
 openlcb::ConfiguredProducer producer_b1(
-    stack.node(), cfg.seg().portab_producers().entry<8>(), (const Gpio*)&PORTB_LINE1);
+    stack.node(), cfg.seg().right_producers().entry<0>(), (const Gpio*)&PORTB_LINE1);
 openlcb::ConfiguredProducer producer_b2(
-    stack.node(), cfg.seg().portab_producers().entry<9>(), (const Gpio*)&PORTB_LINE2);
+    stack.node(), cfg.seg().right_producers().entry<1>(), (const Gpio*)&PORTB_LINE2);
 openlcb::ConfiguredProducer producer_b3(
-    stack.node(), cfg.seg().portab_producers().entry<10>(), (const Gpio*)&PORTB_LINE3);
+    stack.node(), cfg.seg().right_producers().entry<2>(), (const Gpio*)&PORTB_LINE3);
 openlcb::ConfiguredProducer producer_b4(
-    stack.node(), cfg.seg().portab_producers().entry<11>(), (const Gpio*)&PORTB_LINE4);
+    stack.node(), cfg.seg().right_producers().entry<3>(), (const Gpio*)&PORTB_LINE4);
 openlcb::ConfiguredProducer producer_b5(
-    stack.node(), cfg.seg().portab_producers().entry<12>(), (const Gpio*)&PORTB_LINE5);
+    stack.node(), cfg.seg().right_producers().entry<4>(), (const Gpio*)&PORTB_LINE5);
 openlcb::ConfiguredProducer producer_b6(
-    stack.node(), cfg.seg().portab_producers().entry<13>(), (const Gpio*)&PORTB_LINE6);
+    stack.node(), cfg.seg().right_producers().entry<5>(), (const Gpio*)&PORTB_LINE6);
 openlcb::ConfiguredProducer producer_b7(
-    stack.node(), cfg.seg().portab_producers().entry<14>(), (const Gpio*)&PORTB_LINE7);
+    stack.node(), cfg.seg().right_producers().entry<6>(), (const Gpio*)&PORTB_LINE7);
 openlcb::ConfiguredProducer producer_b8(
-    stack.node(), cfg.seg().portab_producers().entry<15>(), (const Gpio*)&PORTB_LINE8);
+    stack.node(), cfg.seg().right_producers().entry<7>(), (const Gpio*)&PORTB_LINE8);
 
 #if NUM_EXTBOARDS == 1
 

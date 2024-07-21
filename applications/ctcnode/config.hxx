@@ -39,8 +39,10 @@ extern const SimpleNodeStaticValues SNIP_STATIC_DATA = {
 using AllConsumers = RepeatedGroup<ConsumerConfig, NUM_OUTPUTS>;
 using AllProducers = RepeatedGroup<ProducerConfig, NUM_INPUTS>;
 
-using PortDEConsumers = RepeatedGroup<ConsumerConfig, 16>;
-using PortABProducers = RepeatedGroup<ProducerConfig, 16>;
+using LeftConsumers = RepeatedGroup<ConsumerConfig, 8>;
+using RightConsumers = RepeatedGroup<ConsumerConfig, 8>;
+using LeftProducers = RepeatedGroup<ProducerConfig, 8>;
+using RightProducers = RepeatedGroup<ProducerConfig, 8>;
 
 #if NUM_EXTBOARDS == 1
 using Ext0PC = RepeatedGroup<PCConfig, 32>;
@@ -67,8 +69,12 @@ CDI_GROUP(IoBoardSegment, Segment(MemoryConfigDefs::SPACE_CONFIG), Offset(128));
 /// optional arguments list.
 CDI_GROUP_ENTRY(internal_config, InternalConfigData);
 CDI_GROUP_ENTRY(nucleo_onboard, NucleoGroup);
-CDI_GROUP_ENTRY(portde_consumers, PortDEConsumers, Name("Column Indicators"), Description("Line 1-8 is Left Column, Line 9-16 is Right Column"), RepName("Indicator"));
-CDI_GROUP_ENTRY(portab_producers, PortABProducers, Name("Column Levers and Buttons"), Description("Line 1-8 is Left Column, Line 9-16 is Right Column"), RepName("Lever Or Button"));
+CDI_GROUP_ENTRY(left_consumers, LeftConsumers, Name("Left Column Indicators"), Description("Indicator Order: 3 Traffic - Left, Center, Right; 3 Model Board; Turnout Thrown, Turnout Normal"), RepName("Indicator"));
+CDI_GROUP_ENTRY(left_producers, RightProducers, Name("Left Column Levers and Buttons"), Description("Button and Lever Order: Code, Call On, Maintaner Call; Switch Lever Normal, Switch Lever Reverse; Traffic Lever Left, Center, Right"), RepName("Lever Or Button"));
+CDI_GROUP_ENTRY(right_consumers, LeftConsumers, Name("Right Column Indicators"), Description("Indicator Order: 3 Traffic - Left, Center, Right; 3 Model Board; Turnout Thrown, Turnout Normal"), RepName("Indicator"));
+CDI_GROUP_ENTRY(right_producers, RightProducers, Name("Right Column Levers and Buttons"), Description("Button and Lever Order: Code, Call On, Maintaner Call; Switch Lever Normal, Switch Lever Reverse; Traffic Lever Left, Center, Right"), RepName("Lever Or Button"));
+
+
 #if NUM_EXTBOARDS > 0
 CDI_GROUP_ENTRY(ext0_pc, Ext0PC, Name("Expansion board 0 lines"),
     Description("Line 1-8 is port Even/A, Line 9-16 is port Even/B, Line 17-24 "
