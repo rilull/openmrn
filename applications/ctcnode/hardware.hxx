@@ -13,6 +13,10 @@ GPIO_PIN(LED_Gold, LedPin, B, 0);
 GPIO_PIN(BLUE_Btn, GpioInputPU, B, 8);
 GPIO_PIN(GOLD_Btn, GpioInputPU, B, 9);
 
+// Bell and Relay
+GPIO_PIN(CTC_Bell, GpioOutputSafeHigh, A, 1);
+GPIO_PIN(CTC_Relay, GpioOutputSafeHigh, A, 2);
+
 // Chip Select line for SPI1 IF we had an expansion port, we don't so not actually used. PB2 unconnected
 GPIO_PIN(EXT_CS, GpioOutputSafeLow, B, 2);
 // Latch line assigned to expansion port, we don't, so not used. PB12 unconnected
@@ -23,8 +27,9 @@ GPIO_PIN(OUT_LAT, GpioOutputSafeLow, B, 4);
 GPIO_PIN(INP_LAT, GpioOutputSafeLow, B, 15);
 
 typedef GpioInitializer<BLUE_Btn_Pin, GOLD_Btn_Pin, //
-	OUT_LAT_Pin, INP_LAT_Pin, LED_Blue_Pin, //
-	LED_Gold_Pin, EXT_CS_Pin, EXT_LAT_Pin, DummyPin>
+	CTC_Bell_Pin, CTC_Relay_Pin, OUT_LAT_Pin, //
+	INP_LAT_Pin, LED_Blue_Pin, LED_Gold_Pin, //
+	EXT_CS_Pin, EXT_LAT_Pin, DummyPin>
     GpioInit;
 
 typedef LED_Blue_Pin BLINKER_RAW_Pin;

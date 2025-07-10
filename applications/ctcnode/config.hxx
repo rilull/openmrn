@@ -26,7 +26,7 @@ namespace openlcb
 /// - the ACDI memory space will contain this data.
 extern const SimpleNodeStaticValues SNIP_STATIC_DATA = {
     4,               "LCCSignals.com", "US&amp;S CTC Node",
-    "Rev A", ".1"};
+    "Rev D", ".2"};
 
 #define NUM_OUTPUTS 16
 #define NUM_INPUTS 1
@@ -39,8 +39,17 @@ extern const SimpleNodeStaticValues SNIP_STATIC_DATA = {
 using AllConsumers = RepeatedGroup<ConsumerConfig, NUM_OUTPUTS>;
 using AllProducers = RepeatedGroup<ProducerConfig, NUM_INPUTS>;
 
+<<<<<<< Updated upstream
 using PortDEConsumers = RepeatedGroup<ConsumerConfig, 16>;
 using PortABProducers = RepeatedGroup<ProducerConfig, 16>;
+=======
+using LeftConsumers = RepeatedGroup<ConsumerConfig, 8>;
+using RightConsumers = RepeatedGroup<ConsumerConfig, 8>;
+using LeftProducers = RepeatedGroup<ProducerConfig, 8>;
+using RightProducers = RepeatedGroup<ProducerConfig, 8>;
+using ModelBoardConsumers = RepeatedGroup<ConsumerConfig, 8>;
+//using PulseConsumers = RepeatedGroup<PulseConsumerConfig, 2>;
+>>>>>>> Stashed changes
 
 #if NUM_EXTBOARDS == 1
 using Ext0PC = RepeatedGroup<PCConfig, 32>;
@@ -54,10 +63,15 @@ using Ext0PC = RepeatedGroup<PCConfig, 64>;
 static constexpr uint16_t CANONICAL_VERSION = 0x1188;
 
 CDI_GROUP(NucleoGroup, Name("Non Column Inputs/Outputs"), Description("These are physically located centrally on the node, not part of any CTC Column. Useful for testing/validation."));
-CDI_GROUP_ENTRY(blue_led, ConsumerConfig, Name("Blue LED"), Description("Blue LED (D?)."));
-CDI_GROUP_ENTRY(gold_led, ConsumerConfig, Name("Yellow LED"), Description("Yellow LED (D?)."));
+CDI_GROUP_ENTRY(blue_led, ConsumerConfig, Name("Blue LED"), Description("Blue LED (D6)."));
+CDI_GROUP_ENTRY(gold_led, ConsumerConfig, Name("Yellow LED"), Description("Yellow LED (D4)."));
 CDI_GROUP_ENTRY(blue_btn, ProducerConfig, Name("Blue Button"), Description("Button with blue cap."));
 CDI_GROUP_ENTRY(gold_btn, ProducerConfig, Name("Gold Button"), Description("Button with yellow cap."));
+CDI_GROUP_END();
+
+CDI_GROUP(AudioGroup, Name("Audio Consumers"), Description("CTC Bell and Relay"));
+CDI_GROUP_ENTRY(pulse_bell, ConsumerConfig, Name("CTC Approach Bell"), Description("Bell"));
+CDI_GROUP_ENTRY(pulse_relay, ConsumerConfig, Name("CTC Relays"), Description("Relay"));
 CDI_GROUP_END();
 
 /// Defines the main segment in the configuration CDI. This is laid out at
@@ -65,10 +79,20 @@ CDI_GROUP_END();
 CDI_GROUP(IoBoardSegment, Segment(MemoryConfigDefs::SPACE_CONFIG), Offset(128));
 /// Each entry declares the name of the current entry, then the type and then
 /// optional arguments list.
-CDI_GROUP_ENTRY(internal_config, InternalConfigData);
 CDI_GROUP_ENTRY(nucleo_onboard, NucleoGroup);
+<<<<<<< Updated upstream
 CDI_GROUP_ENTRY(portde_consumers, PortDEConsumers, Name("Column Indicators"), Description("Line 1-8 is Left Column, Line 9-16 is Right Column"), RepName("Indicator"));
 CDI_GROUP_ENTRY(portab_producers, PortABProducers, Name("Column Levers and Buttons"), Description("Line 1-8 is Left Column, Line 9-16 is Right Column"), RepName("Lever Or Button"));
+=======
+CDI_GROUP_ENTRY(left_consumers, LeftConsumers, Name("Left Column Indicators"), Description("Indicator Order: 3 Traffic - Left, Center, Right; 3 Model Board; Turnout Thrown, Turnout Normal"), RepName("Indicator"));
+CDI_GROUP_ENTRY(left_producers, RightProducers, Name("Left Column Levers and Buttons"), Description("Button and Lever Order: Code, Call On, Maintaner Call; Switch Lever Normal, Switch Lever Reverse; Traffic Lever Left, Center, Right"), RepName("Lever Or Button"));
+CDI_GROUP_ENTRY(right_consumers, LeftConsumers, Name("Right Column Indicators"), Description("Indicator Order: 3 Traffic - Left, Center, Right; 3 Model Board; Turnout Thrown, Turnout Normal"), RepName("Indicator"));
+CDI_GROUP_ENTRY(right_producers, RightProducers, Name("Right Column Levers and Buttons"), Description("Button and Lever Order: Code, Call On, Maintaner Call; Switch Lever Normal, Switch Lever Reverse; Traffic Lever Left, Center, Right"), RepName("Lever Or Button"));
+CDI_GROUP_ENTRY(mb_consumers, ModelBoardConsumers, Name("Model Board Indicators"), Description("Indicators for Model Board"), RepName("Indicator"));
+CDI_GROUP_ENTRY(front_panel, AudioGroup);
+CDI_GROUP_ENTRY(internal_config, InternalConfigData);
+
+>>>>>>> Stashed changes
 #if NUM_EXTBOARDS > 0
 CDI_GROUP_ENTRY(ext0_pc, Ext0PC, Name("Expansion board 0 lines"),
     Description("Line 1-8 is port Even/A, Line 9-16 is port Even/B, Line 17-24 "

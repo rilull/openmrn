@@ -118,6 +118,15 @@ openlcb::ConfiguredProducer producer_blue(
 openlcb::ConfiguredProducer producer_gold(
     stack.node(), cfg.seg().nucleo_onboard().blue_btn(), BLUE_Btn_Pin());
 
+// Consumers for the CTC Bell and Relay Sounds
+// Using the Iowa Scaled Engineering Sound Modules
+// Low input to module keys sound, so staying low keeps the sound on
+// We need to pulse that so the sound does not continously play
+openlcb::ConfiguredConsumer consumer_bell(
+    stack.node(), cfg.seg().front_panel().pulse_bell(), CTC_Bell_Pin());
+openlcb::ConfiguredConsumer consumer_relay(
+    stack.node(), cfg.seg().front_panel().pulse_relay(), CTC_Relay_Pin());
+
 // The producers need to be polled repeatedly for changes and to execute the
 // debouncing algorithm. This class instantiates a refreshloop and adds the two
 // producers to it.
@@ -280,7 +289,7 @@ Service io_service(&io_executor);
 
 uint32_t output_register[1] = {0x00000000};
 
-SpiIOShiftRegister internal_outputs(&io_service, nullptr, OUT_LAT_Pin::instance(), output_register, 2);
+SpiIOShiftRegister internal_outputs(&io_service, nullptr, OUT_LAT_Pin::instance(), output_register, 3);
 
 constexpr const MmapGpio PORTD_LINE1(output_register, 7, true);
 constexpr const MmapGpio PORTD_LINE2(output_register, 6, true);
@@ -300,17 +309,47 @@ constexpr const MmapGpio PORTE_LINE6(output_register, 10, true);
 constexpr const MmapGpio PORTE_LINE7(output_register, 9, true);
 constexpr const MmapGpio PORTE_LINE8(output_register, 8, true);
 
+constexpr const MmapGpio PORTF_LINE1(output_register, 23, true);
+constexpr const MmapGpio PORTF_LINE2(output_register, 22, true);
+constexpr const MmapGpio PORTF_LINE3(output_register, 21, true);
+constexpr const MmapGpio PORTF_LINE4(output_register, 20, true);
+constexpr const MmapGpio PORTF_LINE5(output_register, 19, true);
+constexpr const MmapGpio PORTF_LINE6(output_register, 18, true);
+constexpr const MmapGpio PORTF_LINE7(output_register, 17, true);
+constexpr const MmapGpio PORTF_LINE8(output_register, 16, true);
 
 constexpr const Gpio *const kPortDEGpio[] = {
     &PORTD_LINE1, &PORTD_LINE2, &PORTD_LINE3, &PORTD_LINE4, //
+<<<<<<< Updated upstream
     &PORTD_LINE5, &PORTD_LINE6, &PORTD_LINE7, &PORTD_LINE8, //
-    &PORTE_LINE1, &PORTE_LINE2, &PORTE_LINE3, &PORTE_LINE4, //
-    &PORTE_LINE5, &PORTE_LINE6, &PORTE_LINE7, &PORTE_LINE8  //
+=======
+    &PORTD_LINE5, &PORTD_LINE6, &PORTD_LINE7, &PORTD_LINE8 //
 };
 
+constexpr const Gpio *const kPortEGpio[] = {
+>>>>>>> Stashed changes
+    &PORTE_LINE1, &PORTE_LINE2, &PORTE_LINE3, &PORTE_LINE4, //
+    &PORTE_LINE5, &PORTE_LINE6, &PORTE_LINE7, &PORTE_LINE8
+};
+
+<<<<<<< Updated upstream
 openlcb::MultiConfiguredConsumer portde_consumers(stack.node(), kPortDEGpio,
     ARRAYSIZE(kPortDEGpio), cfg.seg().portde_consumers());
 
+=======
+constexpr const Gpio *const kPortFGpio[] = {
+    &PORTF_LINE1, &PORTF_LINE2, &PORTF_LINE3, &PORTF_LINE4, //
+    &PORTF_LINE5, &PORTF_LINE6, &PORTF_LINE7, &PORTF_LINE8  //
+};
+
+
+openlcb::MultiConfiguredConsumer left_consumers(stack.node(), kPortFGpio,
+    ARRAYSIZE(kPortFGpio), cfg.seg().left_consumers());
+openlcb::MultiConfiguredConsumer right_consumers(stack.node(), kPortEGpio,
+    ARRAYSIZE(kPortEGpio), cfg.seg().right_consumers());
+openlcb::MultiConfiguredConsumer mb_consumers(stack.node(), kPortDGpio,
+    ARRAYSIZE(kPortDGpio), cfg.seg().mb_consumers());
+>>>>>>> Stashed changes
 
 uint32_t input_register[2] = {0};
 
