@@ -1,0 +1,1 @@
+../../../../boards/st-stm32l451ce-ctc/memory_map.ld
