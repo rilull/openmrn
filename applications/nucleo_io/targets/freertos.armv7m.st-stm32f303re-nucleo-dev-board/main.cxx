@@ -27,8 +27,9 @@
  * \file main.cxx
  *
  * Main file for the io board application on the Nucleo board with the DevKit IO
- * board plugged in. This version uses ConfiguredExclusiveConsumer for port D
- * and port E lines 1-6 to test mutually exclusive output groups.
+ * board plugged in. This version uses ConfiguredExclusiveFlashingConsumer for
+ * port D (lines 1-4 and 5-8 as exclusive flashing groups) and
+ * ConfiguredFlashingConsumer for port E (8 independent flashing outputs).
  *
  * @author Balazs Racz
  * @date 18 April 2018
@@ -43,7 +44,8 @@
 
 #include "openlcb/SimpleStack.hxx"
 #include "openlcb/MultiConfiguredConsumer.hxx"
-#include "openlcb/ConfiguredExclusiveConsumer.hxx"
+#include "openlcb/ConfiguredExclusiveFlashingConsumer.hxx"
+#include "openlcb/ConfiguredFlashingConsumer.hxx"
 #include "openlcb/ConfiguredProducer.hxx"
 #include "openlcb/ServoConsumer.hxx"
 
@@ -127,34 +129,29 @@ openlcb::ConfiguredProducer producer_sw1(
 openlcb::RefreshLoop loop(
     stack.node(), {producer_sw1.polling()});
 
-// List of GPIO objects that will be used for the output pins. You should keep
-// the constexpr declaration, because it will produce a compile error in case
-// the list of pointers cannot be compiled into a compiler constant and thus
-// would be placed into RAM instead of ROM.
-constexpr const Gpio *const kDirectGpio[] = {
-    TDRV1_Pin::instance(), TDRV2_Pin::instance(), //
-    TDRV3_Pin::instance(), TDRV4_Pin::instance(), //
-    TDRV5_Pin::instance(), TDRV6_Pin::instance(), //
-    TDRV7_Pin::instance(), TDRV8_Pin::instance()  //
-};
-
-openlcb::MultiConfiguredConsumer direct_consumers(stack.node(), kDirectGpio,
-    ARRAYSIZE(kDirectGpio), cfg.seg().direct_consumers());
-
-// servoPwmCountPerMs defined in hardware.hxx.
-// PWM* servo_channels[] defined in HwInit.cxx
-openlcb::ServoConsumer srv0(
-    stack.node(), cfg.seg().servo_consumers().entry<0>(),
-    servoPwmCountPerMs, servo_channels[0]);
-openlcb::ServoConsumer srv1(
-    stack.node(), cfg.seg().servo_consumers().entry<1>(),
-    servoPwmCountPerMs, servo_channels[1]);
-openlcb::ServoConsumer srv2(
-    stack.node(), cfg.seg().servo_consumers().entry<2>(),
-    servoPwmCountPerMs, servo_channels[2]);
-openlcb::ServoConsumer srv3(
-    stack.node(), cfg.seg().servo_consumers().entry<3>(),
-    servoPwmCountPerMs, servo_channels[3]);
+// Commented out for flashing consumer test -- not used.
+//constexpr const Gpio *const kDirectGpio[] = {
+//    TDRV1_Pin::instance(), TDRV2_Pin::instance(), //
+//    TDRV3_Pin::instance(), TDRV4_Pin::instance(), //
+//    TDRV5_Pin::instance(), TDRV6_Pin::instance(), //
+//    TDRV7_Pin::instance(), TDRV8_Pin::instance()  //
+//};
+//
+//openlcb::MultiConfiguredConsumer direct_consumers(stack.node(), kDirectGpio,
+//    ARRAYSIZE(kDirectGpio), cfg.seg().direct_consumers());
+//
+//openlcb::ServoConsumer srv0(
+//    stack.node(), cfg.seg().servo_consumers().entry<0>(),
+//    servoPwmCountPerMs, servo_channels[0]);
+//openlcb::ServoConsumer srv1(
+//    stack.node(), cfg.seg().servo_consumers().entry<1>(),
+//    servoPwmCountPerMs, servo_channels[1]);
+//openlcb::ServoConsumer srv2(
+//    stack.node(), cfg.seg().servo_consumers().entry<2>(),
+//    servoPwmCountPerMs, servo_channels[2]);
+//openlcb::ServoConsumer srv3(
+//    stack.node(), cfg.seg().servo_consumers().entry<3>(),
+//    servoPwmCountPerMs, servo_channels[3]);
 
 class FactoryResetHelper : public DefaultConfigUpdateListener {
 public:
@@ -333,48 +330,49 @@ constexpr const MmapGpio PORTE_LINE7(output_register, 9, true);
 constexpr const MmapGpio PORTE_LINE8(output_register, 8, true);
 
 // ======================================================================
-// Port D exclusive groups: lines 1-4 and 5-8 are mutually exclusive.
+// Port D exclusive flashing groups: lines 1-4 and 5-8.
+// Each output supports steady on and flashing, with only one active.
 // ======================================================================
 
-/// Port D lines 1, 2, 3, 4 — exclusive group 1.
-constexpr const Gpio *const kPortDExcl1Gpio[] = {
+/// Port D lines 1, 2, 3, 4 — exclusive flashing group 1.
+constexpr const Gpio *const kPortDExclFlash1Gpio[] = {
     &PORTD_LINE1, &PORTD_LINE2, &PORTD_LINE3, &PORTD_LINE4,
 };
 
-openlcb::ConfiguredExclusiveConsumer portd_excl_1(stack.node(),
-    kPortDExcl1Gpio, ARRAYSIZE(kPortDExcl1Gpio),
-    cfg.seg().portd_excl_1());
+openlcb::ConfiguredExclusiveFlashingConsumer portd_excl_flash_1(stack.node(),
+    kPortDExclFlash1Gpio, ARRAYSIZE(kPortDExclFlash1Gpio),
+    cfg.seg().portd_excl_flash_1());
 
-/// Port D lines 5, 6, 7, 8 — exclusive group 2.
-constexpr const Gpio *const kPortDExcl2Gpio[] = {
+/// Port D lines 5, 6, 7, 8 — exclusive flashing group 2.
+constexpr const Gpio *const kPortDExclFlash2Gpio[] = {
     &PORTD_LINE5, &PORTD_LINE6, &PORTD_LINE7, &PORTD_LINE8,
 };
 
-openlcb::ConfiguredExclusiveConsumer portd_excl_2(stack.node(),
-    kPortDExcl2Gpio, ARRAYSIZE(kPortDExcl2Gpio),
-    cfg.seg().portd_excl_2());
+openlcb::ConfiguredExclusiveFlashingConsumer portd_excl_flash_2(stack.node(),
+    kPortDExclFlash2Gpio, ARRAYSIZE(kPortDExclFlash2Gpio),
+    cfg.seg().portd_excl_flash_2());
 
 // ======================================================================
-// Port E exclusive groups: lines 1-4 and 5-8 are mutually exclusive.
+// Port E standalone flashing outputs: lines 1-8.
+// Each output independently supports steady on, flashing, and off.
 // ======================================================================
 
-/// Port E lines 1, 2, 3, 4 — exclusive group 1.
-constexpr const Gpio *const kPortEExcl1Gpio[] = {
-    &PORTE_LINE1, &PORTE_LINE2, &PORTE_LINE3, &PORTE_LINE4,
-};
-
-openlcb::ConfiguredExclusiveConsumer porte_excl_1(stack.node(),
-    kPortEExcl1Gpio, ARRAYSIZE(kPortEExcl1Gpio),
-    cfg.seg().porte_excl_1());
-
-/// Port E lines 5, 6, 7, 8 — exclusive group 2.
-constexpr const Gpio *const kPortEExcl2Gpio[] = {
-    &PORTE_LINE5, &PORTE_LINE6, &PORTE_LINE7, &PORTE_LINE8,
-};
-
-openlcb::ConfiguredExclusiveConsumer porte_excl_2(stack.node(),
-    kPortEExcl2Gpio, ARRAYSIZE(kPortEExcl2Gpio),
-    cfg.seg().porte_excl_2());
+openlcb::ConfiguredFlashingConsumer porte_flash_1(stack.node(),
+    cfg.seg().porte_flash().entry<0>(), (const Gpio *)&PORTE_LINE1);
+openlcb::ConfiguredFlashingConsumer porte_flash_2(stack.node(),
+    cfg.seg().porte_flash().entry<1>(), (const Gpio *)&PORTE_LINE2);
+openlcb::ConfiguredFlashingConsumer porte_flash_3(stack.node(),
+    cfg.seg().porte_flash().entry<2>(), (const Gpio *)&PORTE_LINE3);
+openlcb::ConfiguredFlashingConsumer porte_flash_4(stack.node(),
+    cfg.seg().porte_flash().entry<3>(), (const Gpio *)&PORTE_LINE4);
+openlcb::ConfiguredFlashingConsumer porte_flash_5(stack.node(),
+    cfg.seg().porte_flash().entry<4>(), (const Gpio *)&PORTE_LINE5);
+openlcb::ConfiguredFlashingConsumer porte_flash_6(stack.node(),
+    cfg.seg().porte_flash().entry<5>(), (const Gpio *)&PORTE_LINE6);
+openlcb::ConfiguredFlashingConsumer porte_flash_7(stack.node(),
+    cfg.seg().porte_flash().entry<6>(), (const Gpio *)&PORTE_LINE7);
+openlcb::ConfiguredFlashingConsumer porte_flash_8(stack.node(),
+    cfg.seg().porte_flash().entry<7>(), (const Gpio *)&PORTE_LINE8);
 
 #ifdef PORTD_SNAP
 
@@ -683,6 +681,14 @@ openlcb::RefreshLoop loopab(stack.node(),
         producer_b3.polling(), producer_b4.polling(), //
         producer_b5.polling(), producer_b6.polling(), //
         producer_b7.polling(), producer_b8.polling(), //
+        // Port D exclusive flashing groups (need 33Hz polling for flash).
+        &portd_excl_flash_1,                          //
+        &portd_excl_flash_2,                          //
+        // Port E standalone flashing outputs (need 33Hz polling for flash).
+        &porte_flash_1, &porte_flash_2,               //
+        &porte_flash_3, &porte_flash_4,               //
+        &porte_flash_5, &porte_flash_6,               //
+        &porte_flash_7, &porte_flash_8,               //
 #ifdef PORTD_SNAP
 	&turnout_pulse_consumer_1,                    //
         &turnout_pulse_consumer_2,                    //
