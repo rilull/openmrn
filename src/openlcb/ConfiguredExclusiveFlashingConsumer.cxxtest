@@ -1,0 +1,519 @@
+/** \copyright
+ * Copyright (c) 2025, Balazs Racz
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are  permitted provided that the following conditions are met:
+ *
+ *  - Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ *
+ *  - Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
+ * \file ConfiguredExclusiveFlashingConsumer.cxxtest
+ *
+ * Unit tests for ConfiguredExclusiveFlashingConsumer.
+ *
+ * @author Balazs Racz
+ * @date 26 Feb 2025
+ */
+
+#include "utils/async_if_test_helper.hxx"
+
+#include "openlcb/ConfiguredExclusiveFlashingConsumer.hxx"
+#include "openlcb/ConfigUpdateFlow.hxx"
+#include "os/MmapGpio.hxx"
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+namespace openlcb
+{
+
+// Event IDs: 3 outputs x 2 events each = 6 events.
+// Output 0 (Red):    steady=..0010, flashing=..0011
+// Output 1 (Yellow): steady=..0012, flashing=..0013
+// Output 2 (Green):  steady=..0014, flashing=..0015
+static const uint64_t kEventBase = 0x05010101FFFF0010ULL;
+
+/// Test fixture for ConfiguredExclusiveFlashingConsumer.
+class ConfiguredExclusiveFlashingConsumerTest : public AsyncNodeTest
+{
+protected:
+    ConfiguredExclusiveFlashingConsumerTest()
+    {
+    }
+
+    ~ConfiguredExclusiveFlashingConsumerTest()
+    {
+        wait_for_event_thread();
+        if (fd_ >= 0)
+        {
+            ::close(fd_);
+        }
+        unlink(tempFile_);
+    }
+
+    /// Creates a temporary config file with 3 output entries and initializes
+    /// the consumer.
+    /// @param on_period flash on-time for all outputs (default 3).
+    /// @param off_period flash off-time for all outputs (default 3).
+    void create_consumer(uint8_t on_period = 3, uint8_t off_period = 3)
+    {
+        fd_ = mkstemp(tempFile_);
+        ASSERT_GE(fd_, 0);
+
+        // ExclusiveFlashingConsumerConfig layout per entry:
+        //   8 bytes description (StringConfigEntry<8>)
+        //   8 bytes event (steady) (EventConfigEntry, big-endian)
+        //   8 bytes event_flashing (EventConfigEntry, big-endian)
+        //   1 byte on_period (Uint8ConfigEntry)
+        //   1 byte off_period (Uint8ConfigEntry)
+        // Total: 26 bytes per entry, 78 bytes for 3 entries.
+
+        static const unsigned kEntrySize = 26;
+        uint8_t buf[kEntrySize * 3];
+        memset(buf, 0, sizeof(buf));
+
+        for (unsigned i = 0; i < 3; ++i)
+        {
+            unsigned base = i * kEntrySize;
+            // event (steady) at offset 8.
+            uint64_t ev_steady = htobe64(kEventBase + i * 2);
+            memcpy(buf + base + 8, &ev_steady, 8);
+            // event_flashing at offset 16.
+            uint64_t ev_flash = htobe64(kEventBase + i * 2 + 1);
+            memcpy(buf + base + 16, &ev_flash, 8);
+            // on_period at offset 24.
+            buf[base + 24] = on_period;
+            // off_period at offset 25.
+            buf[base + 25] = off_period;
+        }
+
+        ASSERT_EQ((ssize_t)sizeof(buf), ::write(fd_, buf, sizeof(buf)));
+        ::lseek(fd_, 0, SEEK_SET);
+
+        updateFlow_.TEST_set_fd(fd_);
+
+        consumer_.reset(new ConfiguredExclusiveFlashingConsumer(
+            node_, kPins, 3, cfg_));
+
+        wait_for_main_executor();
+        wait_for_event_thread();
+    }
+
+    /// Calls poll_33hz on the consumer the specified number of times.
+    void run_poll_cycles(unsigned count)
+    {
+        for (unsigned i = 0; i < count; ++i)
+        {
+            SyncNotifiable n;
+            consumer_->poll_33hz(&helper_, &n);
+            n.wait_for_notification();
+        }
+    }
+
+    /// Helper to format an event ID as a CAN packet hex string (16 hex chars).
+    static string event_hex(uint64_t event)
+    {
+        char buf[17];
+        snprintf(buf, sizeof(buf), "%016llX",
+                 (unsigned long long)event);
+        return string(buf);
+    }
+
+    /// Sends an event report for the given event ID.
+    void send_event(uint64_t event)
+    {
+        string pkt = ":X195B4001N" + event_hex(event) + ";";
+        send_packet(pkt.c_str());
+        wait_for_event_thread();
+    }
+
+    /// GPIO storage (3 bits: bit 0, 1, 2).
+    uint32_t gpioStorage_{0};
+
+    /// Three GPIO outputs backed by the storage word.
+    MmapGpio pin0_{&gpioStorage_, 0, true};
+    MmapGpio pin1_{&gpioStorage_, 1, true};
+    MmapGpio pin2_{&gpioStorage_, 2, true};
+
+    /// Pin array.
+    const Gpio *const kPins[3]{&pin0_, &pin1_, &pin2_};
+
+    /// Configuration group for 3 exclusive flashing consumers at offset 0.
+    RepeatedGroup<ExclusiveFlashingConsumerConfig, 3> cfg_{0};
+
+    /// Config update flow.
+    ConfigUpdateFlow updateFlow_{ifCan_.get()};
+
+    /// WriteHelper for polling.
+    WriteHelper helper_;
+
+    /// The consumer under test.
+    std::unique_ptr<ConfiguredExclusiveFlashingConsumer> consumer_;
+
+    int fd_{-1};
+    char tempFile_[40] = "/tmp/exfl_test_XXXXXX";
+};
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, CreateDestroy)
+{
+    create_consumer();
+}
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, InitiallyAllOff)
+{
+    create_consumer();
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+}
+
+// --- Steady selection tests ---
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, SelectSteadyFirst)
+{
+    create_consumer();
+
+    // Steady red.
+    send_event(kEventBase + 0); // output 0 steady
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+}
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, SelectSteadySecond)
+{
+    create_consumer();
+
+    // Steady yellow.
+    send_event(kEventBase + 2); // output 1 steady
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_TRUE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+}
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, ExclusiveSteadySwitching)
+{
+    create_consumer();
+
+    // Steady red.
+    send_event(kEventBase + 0);
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+
+    // Switch to steady green -- red turns off.
+    send_event(kEventBase + 4);
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_TRUE(pin2_.is_set());
+
+    // Switch to steady yellow -- green turns off.
+    send_event(kEventBase + 2);
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_TRUE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+}
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, SteadyNotAffectedByPolling)
+{
+    create_consumer();
+
+    send_event(kEventBase + 0); // steady red
+    EXPECT_TRUE(pin0_.is_set());
+
+    run_poll_cycles(50);
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+}
+
+// --- Flashing selection tests ---
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, SelectFlashing)
+{
+    create_consumer(3, 3);
+
+    // Flashing red.
+    send_event(kEventBase + 1); // output 0 flashing
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+
+    // Wait for toggle.
+    run_poll_cycles(3);
+    EXPECT_TRUE(pin0_.is_set()); // still on during countdown
+    run_poll_cycles(1);
+    EXPECT_FALSE(pin0_.is_set()); // toggled off
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+
+    // Wait for toggle back.
+    run_poll_cycles(3);
+    EXPECT_FALSE(pin0_.is_set());
+    run_poll_cycles(1);
+    EXPECT_TRUE(pin0_.is_set());
+}
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, FlashingSwitchesExclusively)
+{
+    create_consumer(3, 3);
+
+    // Flashing red.
+    send_event(kEventBase + 1);
+    EXPECT_TRUE(pin0_.is_set());
+
+    // Run a couple ticks.
+    run_poll_cycles(2);
+
+    // Switch to flashing yellow -- red must turn off.
+    send_event(kEventBase + 3);
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_TRUE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+
+    // Yellow should now be flashing.
+    run_poll_cycles(3);
+    EXPECT_TRUE(pin1_.is_set());
+    run_poll_cycles(1);
+    EXPECT_FALSE(pin1_.is_set());
+}
+
+// --- Mixed mode tests ---
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, SteadyToFlashingSameOutput)
+{
+    create_consumer(3, 3);
+
+    // Steady red.
+    send_event(kEventBase + 0);
+    EXPECT_TRUE(pin0_.is_set());
+
+    // Switch to flashing red.
+    send_event(kEventBase + 1);
+    EXPECT_TRUE(pin0_.is_set());
+
+    // Should now toggle.
+    run_poll_cycles(4);
+    EXPECT_FALSE(pin0_.is_set());
+}
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, FlashingToSteadySameOutput)
+{
+    create_consumer(3, 3);
+
+    // Flashing red.
+    send_event(kEventBase + 1);
+    run_poll_cycles(4);
+    EXPECT_FALSE(pin0_.is_set()); // currently off in flash cycle
+
+    // Switch to steady red -- should turn on immediately.
+    send_event(kEventBase + 0);
+    EXPECT_TRUE(pin0_.is_set());
+
+    // Should stay on.
+    run_poll_cycles(20);
+    EXPECT_TRUE(pin0_.is_set());
+}
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, FlashingToSteadyDifferentOutput)
+{
+    create_consumer(3, 3);
+
+    // Flashing red.
+    send_event(kEventBase + 1);
+    EXPECT_TRUE(pin0_.is_set());
+    run_poll_cycles(2);
+
+    // Switch to steady green.
+    send_event(kEventBase + 4);
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_TRUE(pin2_.is_set());
+
+    // Green stays steady.
+    run_poll_cycles(20);
+    EXPECT_TRUE(pin2_.is_set());
+    EXPECT_FALSE(pin0_.is_set());
+}
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, SteadyToFlashingDifferentOutput)
+{
+    create_consumer(3, 3);
+
+    // Steady red.
+    send_event(kEventBase + 0);
+    EXPECT_TRUE(pin0_.is_set());
+
+    // Switch to flashing yellow.
+    send_event(kEventBase + 3);
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_TRUE(pin1_.is_set());
+
+    // Yellow should flash.
+    run_poll_cycles(4);
+    EXPECT_FALSE(pin1_.is_set());
+}
+
+// --- Duty cycle test ---
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, AsymmetricDutyCycle)
+{
+    // on_period=2, off_period=5.
+    create_consumer(2, 5);
+
+    send_event(kEventBase + 1); // flashing red
+    EXPECT_TRUE(pin0_.is_set());
+
+    // 2 ticks on countdown.
+    run_poll_cycles(2);
+    EXPECT_TRUE(pin0_.is_set());
+
+    // Toggle off, off_period=5.
+    run_poll_cycles(1);
+    EXPECT_FALSE(pin0_.is_set());
+
+    // 5 ticks off countdown.
+    run_poll_cycles(5);
+    EXPECT_FALSE(pin0_.is_set());
+
+    // Toggle on, on_period=2.
+    run_poll_cycles(1);
+    EXPECT_TRUE(pin0_.is_set());
+}
+
+// --- Identify tests ---
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, IdentifyInitiallyAllInvalid)
+{
+    create_consumer();
+
+    // All 6 events should be INVALID before any event is received.
+    for (unsigned i = 0; i < 6; ++i)
+    {
+        string req = ":X198F4001N" + event_hex(kEventBase + i) + ";";
+        string resp = ":X194C522AN" + event_hex(kEventBase + i) + ";";
+        send_packet_and_expect_response(req.c_str(), resp.c_str());
+    }
+}
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, IdentifySteadyActive)
+{
+    create_consumer();
+
+    // Steady red (event +0).
+    send_event(kEventBase + 0);
+    Mock::VerifyAndClear(&canBus_);
+
+    // Red steady = VALID (4C4).
+    send_packet_and_expect_response(
+        ":X198F4001N05010101FFFF0010;",
+        ":X194C422AN05010101FFFF0010;");
+    // Red flashing = INVALID (4C5).
+    send_packet_and_expect_response(
+        ":X198F4001N05010101FFFF0011;",
+        ":X194C522AN05010101FFFF0011;");
+    // Yellow steady = INVALID.
+    send_packet_and_expect_response(
+        ":X198F4001N05010101FFFF0012;",
+        ":X194C522AN05010101FFFF0012;");
+}
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, IdentifyFlashingActive)
+{
+    create_consumer();
+
+    // Flashing yellow (event +3).
+    send_event(kEventBase + 3);
+    Mock::VerifyAndClear(&canBus_);
+
+    // Yellow flashing = VALID.
+    send_packet_and_expect_response(
+        ":X198F4001N05010101FFFF0013;",
+        ":X194C422AN05010101FFFF0013;");
+    // Yellow steady = INVALID.
+    send_packet_and_expect_response(
+        ":X198F4001N05010101FFFF0012;",
+        ":X194C522AN05010101FFFF0012;");
+    // Red steady = INVALID.
+    send_packet_and_expect_response(
+        ":X198F4001N05010101FFFF0010;",
+        ":X194C522AN05010101FFFF0010;");
+}
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, GlobalIdentifySteady)
+{
+    create_consumer();
+
+    // Steady green (event +4).
+    send_event(kEventBase + 4);
+    Mock::VerifyAndClear(&canBus_);
+
+    // Global identify: 6 ConsumerIdentified messages.
+    expect_packet(":X194C522AN05010101FFFF0010;"); // red steady INVALID
+    expect_packet(":X194C522AN05010101FFFF0011;"); // red flash INVALID
+    expect_packet(":X194C522AN05010101FFFF0012;"); // yellow steady INVALID
+    expect_packet(":X194C522AN05010101FFFF0013;"); // yellow flash INVALID
+    expect_packet(":X194C422AN05010101FFFF0014;"); // green steady VALID
+    expect_packet(":X194C522AN05010101FFFF0015;"); // green flash INVALID
+    send_packet(":X19970001N;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+}
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, GlobalIdentifyFlashing)
+{
+    create_consumer();
+
+    // Flashing red (event +1).
+    send_event(kEventBase + 1);
+    Mock::VerifyAndClear(&canBus_);
+
+    expect_packet(":X194C522AN05010101FFFF0010;"); // red steady INVALID
+    expect_packet(":X194C422AN05010101FFFF0011;"); // red flash VALID
+    expect_packet(":X194C522AN05010101FFFF0012;"); // yellow steady INVALID
+    expect_packet(":X194C522AN05010101FFFF0013;"); // yellow flash INVALID
+    expect_packet(":X194C522AN05010101FFFF0014;"); // green steady INVALID
+    expect_packet(":X194C522AN05010101FFFF0015;"); // green flash INVALID
+    send_packet(":X19970001N;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+}
+
+// --- Unrelated event ---
+
+TEST_F(ConfiguredExclusiveFlashingConsumerTest, UnrelatedEventIgnored)
+{
+    create_consumer();
+
+    send_event(kEventBase + 0); // steady red
+    EXPECT_TRUE(pin0_.is_set());
+
+    // Unrelated event.
+    send_packet(":X195B4001N05010101FFFF00FF;");
+    wait_for_event_thread();
+
+    // State unchanged.
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+}
+
+} // namespace openlcb

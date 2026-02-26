@@ -45,8 +45,9 @@
 namespace openlcb
 {
 
-static const uint64_t kEventOn = 0x05010101FFFF0000ULL;
-static const uint64_t kEventOff = 0x05010101FFFF0001ULL;
+static const uint64_t kEventSteady = 0x05010101FFFF0000ULL;
+static const uint64_t kEventFlashing = 0x05010101FFFF0001ULL;
+static const uint64_t kEventOff = 0x05010101FFFF0002ULL;
 
 /// Test fixture for ConfiguredFlashingConsumer.
 class ConfiguredFlashingConsumerTest : public AsyncNodeTest
@@ -67,31 +68,40 @@ protected:
     }
 
     /// Creates a temporary config file and initializes the consumer.
-    /// @param period flash half-period in 33Hz ticks (default 3 for fast
+    /// @param on_period flash on-time in 33Hz ticks (default 3 for fast
     /// tests).
-    void create_consumer(uint8_t period = 3)
+    /// @param off_period flash off-time in 33Hz ticks (default 3 for fast
+    /// tests).
+    void create_consumer(uint8_t on_period = 3, uint8_t off_period = 3)
     {
         fd_ = mkstemp(tempFile_);
         ASSERT_GE(fd_, 0);
 
         // FlashingConsumerConfig layout:
         //   8 bytes description (StringConfigEntry<8>)
-        //   8 bytes event_on (EventConfigEntry, big-endian)
+        //   8 bytes event_steady (EventConfigEntry, big-endian)
+        //   8 bytes event_flashing (EventConfigEntry, big-endian)
         //   8 bytes event_off (EventConfigEntry, big-endian)
-        //   1 byte period (Uint8ConfigEntry)
-        // Total: 25 bytes.
+        //   1 byte on_period (Uint8ConfigEntry)
+        //   1 byte off_period (Uint8ConfigEntry)
+        // Total: 34 bytes.
 
-        uint8_t buf[25];
+        uint8_t buf[34];
         memset(buf, 0, sizeof(buf));
 
-        // event_on at offset 8.
-        uint64_t ev_on = htobe64(kEventOn);
-        memcpy(buf + 8, &ev_on, 8);
-        // event_off at offset 16.
+        // event_steady at offset 8.
+        uint64_t ev_steady = htobe64(kEventSteady);
+        memcpy(buf + 8, &ev_steady, 8);
+        // event_flashing at offset 16.
+        uint64_t ev_flashing = htobe64(kEventFlashing);
+        memcpy(buf + 16, &ev_flashing, 8);
+        // event_off at offset 24.
         uint64_t ev_off = htobe64(kEventOff);
-        memcpy(buf + 16, &ev_off, 8);
-        // period at offset 24.
-        buf[24] = period;
+        memcpy(buf + 24, &ev_off, 8);
+        // on_period at offset 32.
+        buf[32] = on_period;
+        // off_period at offset 33.
+        buf[33] = off_period;
 
         ASSERT_EQ((ssize_t)sizeof(buf), ::write(fd_, buf, sizeof(buf)));
         ::lseek(fd_, 0, SEEK_SET);
@@ -149,79 +159,117 @@ TEST_F(ConfiguredFlashingConsumerTest, InitiallyOff)
     create_consumer();
     EXPECT_FALSE(pin0_.is_set());
     EXPECT_FALSE(consumer_->is_flashing());
+    EXPECT_FALSE(consumer_->is_steady());
 }
 
-TEST_F(ConfiguredFlashingConsumerTest, EventOnStartsFlashing)
+// --- Steady-on tests ---
+
+TEST_F(ConfiguredFlashingConsumerTest, SteadyOnTurnsOutputOn)
 {
     create_consumer();
 
-    // Send the ON event.
     send_packet(":X195B4001N05010101FFFF0000;");
     wait_for_event_thread();
 
-    // Pin should be set immediately and flashing state active.
     EXPECT_TRUE(pin0_.is_set());
-    EXPECT_TRUE(consumer_->is_flashing());
-}
-
-TEST_F(ConfiguredFlashingConsumerTest, EventOffStopsFlashing)
-{
-    create_consumer();
-
-    // Start flashing.
-    send_packet(":X195B4001N05010101FFFF0000;");
-    wait_for_event_thread();
-    EXPECT_TRUE(consumer_->is_flashing());
-
-    // Send the OFF event.
-    send_packet(":X195B4001N05010101FFFF0001;");
-    wait_for_event_thread();
-
-    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_TRUE(consumer_->is_steady());
     EXPECT_FALSE(consumer_->is_flashing());
 }
 
-TEST_F(ConfiguredFlashingConsumerTest, PollTogglesPin)
+TEST_F(ConfiguredFlashingConsumerTest, SteadyOnNotAffectedByPolling)
 {
-    // Period of 3 ticks per half-cycle.
-    create_consumer(3);
+    create_consumer();
 
-    // Start flashing -- pin goes high immediately.
     send_packet(":X195B4001N05010101FFFF0000;");
     wait_for_event_thread();
     EXPECT_TRUE(pin0_.is_set());
 
-    // Tick 1: remaining decrements from 3 to 2. Pin stays high.
-    run_poll_cycles(1);
+    // Run many poll cycles -- pin should stay high.
+    run_poll_cycles(50);
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_TRUE(consumer_->is_steady());
+}
+
+// --- Flashing tests ---
+
+TEST_F(ConfiguredFlashingConsumerTest, FlashingStartsWithPinHigh)
+{
+    create_consumer();
+
+    send_packet(":X195B4001N05010101FFFF0001;");
+    wait_for_event_thread();
+
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_TRUE(consumer_->is_flashing());
+    EXPECT_FALSE(consumer_->is_steady());
+}
+
+TEST_F(ConfiguredFlashingConsumerTest, FlashingTogglesPin)
+{
+    // on_period=3, off_period=3 (symmetric).
+    create_consumer(3, 3);
+
+    send_packet(":X195B4001N05010101FFFF0001;");
+    wait_for_event_thread();
     EXPECT_TRUE(pin0_.is_set());
 
-    // Tick 2: remaining decrements to 1. Pin stays high.
-    run_poll_cycles(1);
+    // Ticks 1-3: remaining counts down from 3 to 0. Pin stays high.
+    run_poll_cycles(3);
     EXPECT_TRUE(pin0_.is_set());
 
-    // Tick 3: remaining decrements to 0. Pin stays high.
-    run_poll_cycles(1);
-    EXPECT_TRUE(pin0_.is_set());
-
-    // Tick 4: remaining was 0, so toggle. Pin goes low, remaining reloads.
+    // Tick 4: remaining was 0, toggle to low, reload remaining = off_period.
     run_poll_cycles(1);
     EXPECT_FALSE(pin0_.is_set());
 
-    // 3 more ticks: remaining counts down again.
+    // Ticks 5-7: remaining counts down. Pin stays low.
     run_poll_cycles(3);
     EXPECT_FALSE(pin0_.is_set());
 
-    // Tick 8: toggle again. Pin goes high.
+    // Tick 8: toggle to high, reload remaining = on_period.
     run_poll_cycles(1);
     EXPECT_TRUE(pin0_.is_set());
+}
+
+TEST_F(ConfiguredFlashingConsumerTest, AsymmetricDutyCycle)
+{
+    // on_period=2, off_period=5 (short on, long off).
+    create_consumer(2, 5);
+
+    send_packet(":X195B4001N05010101FFFF0001;");
+    wait_for_event_thread();
+    EXPECT_TRUE(pin0_.is_set());
+
+    // Ticks 1-2: remaining counts down from 2. Pin stays high.
+    run_poll_cycles(2);
+    EXPECT_TRUE(pin0_.is_set());
+
+    // Tick 3: toggle to low. remaining reloads to off_period=5.
+    run_poll_cycles(1);
+    EXPECT_FALSE(pin0_.is_set());
+
+    // Ticks 4-8: remaining counts down from 5. Pin stays low.
+    run_poll_cycles(5);
+    EXPECT_FALSE(pin0_.is_set());
+
+    // Tick 9: toggle to high. remaining reloads to on_period=2.
+    run_poll_cycles(1);
+    EXPECT_TRUE(pin0_.is_set());
+
+    // Ticks 10-11: remaining counts down. Pin stays high.
+    run_poll_cycles(2);
+    EXPECT_TRUE(pin0_.is_set());
+
+    // Tick 12: toggle to low again.
+    run_poll_cycles(1);
+    EXPECT_FALSE(pin0_.is_set());
 }
 
 TEST_F(ConfiguredFlashingConsumerTest, PeriodOfOne)
 {
-    // Period of 1 gives fastest flash: toggles every other tick.
-    create_consumer(1);
+    // Fastest flash: toggles every other tick.
+    create_consumer(1, 1);
 
-    send_packet(":X195B4001N05010101FFFF0000;");
+    send_packet(":X195B4001N05010101FFFF0001;");
     wait_for_event_thread();
     EXPECT_TRUE(pin0_.is_set());
 
@@ -242,101 +290,197 @@ TEST_F(ConfiguredFlashingConsumerTest, PeriodOfOne)
     EXPECT_TRUE(pin0_.is_set());
 }
 
-TEST_F(ConfiguredFlashingConsumerTest, StopMidFlash)
-{
-    create_consumer(3);
+// --- Off tests ---
 
-    // Start flashing.
+TEST_F(ConfiguredFlashingConsumerTest, OffFromSteady)
+{
+    create_consumer();
+
+    // Steady on.
     send_packet(":X195B4001N05010101FFFF0000;");
     wait_for_event_thread();
     EXPECT_TRUE(pin0_.is_set());
 
-    // Run a few poll cycles (pin still high).
-    run_poll_cycles(2);
-    EXPECT_TRUE(pin0_.is_set());
+    // Off.
+    send_packet(":X195B4001N05010101FFFF0002;");
+    wait_for_event_thread();
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_FALSE(consumer_->is_steady());
+    EXPECT_FALSE(consumer_->is_flashing());
+}
 
-    // Stop flashing mid-cycle.
+TEST_F(ConfiguredFlashingConsumerTest, OffFromFlashing)
+{
+    create_consumer();
+
+    // Start flashing.
     send_packet(":X195B4001N05010101FFFF0001;");
+    wait_for_event_thread();
+    EXPECT_TRUE(consumer_->is_flashing());
+
+    // Off.
+    send_packet(":X195B4001N05010101FFFF0002;");
     wait_for_event_thread();
     EXPECT_FALSE(pin0_.is_set());
     EXPECT_FALSE(consumer_->is_flashing());
 
-    // Further poll cycles should not toggle anything.
-    run_poll_cycles(10);
+    // Further polling should be no-op.
+    run_poll_cycles(20);
     EXPECT_FALSE(pin0_.is_set());
 }
 
-TEST_F(ConfiguredFlashingConsumerTest, RestartFlashing)
-{
-    create_consumer(3);
+// --- State transition tests ---
 
-    // Start flashing.
+TEST_F(ConfiguredFlashingConsumerTest, SteadyToFlashing)
+{
+    create_consumer(3, 3);
+
+    // Steady on.
     send_packet(":X195B4001N05010101FFFF0000;");
     wait_for_event_thread();
     EXPECT_TRUE(pin0_.is_set());
+    EXPECT_TRUE(consumer_->is_steady());
 
-    // Run until pin toggles off.
+    // Switch to flashing.
+    send_packet(":X195B4001N05010101FFFF0001;");
+    wait_for_event_thread();
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_TRUE(consumer_->is_flashing());
+
+    // Should toggle after period+1 ticks.
+    run_poll_cycles(3);
+    EXPECT_TRUE(pin0_.is_set());
+    run_poll_cycles(1);
+    EXPECT_FALSE(pin0_.is_set());
+}
+
+TEST_F(ConfiguredFlashingConsumerTest, FlashingToSteady)
+{
+    create_consumer(3, 3);
+
+    // Start flashing.
+    send_packet(":X195B4001N05010101FFFF0001;");
+    wait_for_event_thread();
+    EXPECT_TRUE(pin0_.is_set());
+
+    // Let it toggle to low.
     run_poll_cycles(4);
     EXPECT_FALSE(pin0_.is_set());
 
-    // Stop flashing.
-    send_packet(":X195B4001N05010101FFFF0001;");
+    // Switch to steady -- pin should go high immediately.
+    send_packet(":X195B4001N05010101FFFF0000;");
+    wait_for_event_thread();
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_TRUE(consumer_->is_steady());
+
+    // Polling should not toggle.
+    run_poll_cycles(20);
+    EXPECT_TRUE(pin0_.is_set());
+}
+
+TEST_F(ConfiguredFlashingConsumerTest, OffToFlashing)
+{
+    create_consumer(3, 3);
+
+    // Explicit off.
+    send_packet(":X195B4001N05010101FFFF0002;");
     wait_for_event_thread();
     EXPECT_FALSE(pin0_.is_set());
 
-    // Restart flashing -- pin should go high immediately.
-    send_packet(":X195B4001N05010101FFFF0000;");
+    // Start flashing.
+    send_packet(":X195B4001N05010101FFFF0001;");
     wait_for_event_thread();
     EXPECT_TRUE(pin0_.is_set());
     EXPECT_TRUE(consumer_->is_flashing());
 }
 
+// --- Unrelated event ---
+
 TEST_F(ConfiguredFlashingConsumerTest, UnrelatedEventIgnored)
 {
     create_consumer();
 
-    // Send an unrelated event.
     send_packet(":X195B4001N05010101FFFF00FF;");
     wait_for_event_thread();
     EXPECT_FALSE(pin0_.is_set());
     EXPECT_FALSE(consumer_->is_flashing());
+    EXPECT_FALSE(consumer_->is_steady());
 }
 
-TEST_F(ConfiguredFlashingConsumerTest, IdentifyConsumerNotFlashing)
+// --- Identify tests ---
+
+TEST_F(ConfiguredFlashingConsumerTest, IdentifyConsumerInitiallyOff)
 {
     create_consumer();
 
-    // Not flashing: event_on should be INVALID (0x4C5), event_off VALID
-    // (0x4C4).
+    // Initially off: event_off = VALID, event_steady = INVALID,
+    // event_flashing = INVALID.
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0002;",
+        ":X194C422AN05010101FFFF0002;");
     send_packet_and_expect_response(":X198F4001N05010101FFFF0000;",
         ":X194C522AN05010101FFFF0000;");
     send_packet_and_expect_response(":X198F4001N05010101FFFF0001;",
-        ":X194C422AN05010101FFFF0001;");
+        ":X194C522AN05010101FFFF0001;");
+}
+
+TEST_F(ConfiguredFlashingConsumerTest, IdentifyConsumerSteady)
+{
+    create_consumer();
+
+    send_packet(":X195B4001N05010101FFFF0000;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+
+    // Steady: event_steady = VALID, others INVALID.
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0000;",
+        ":X194C422AN05010101FFFF0000;");
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0001;",
+        ":X194C522AN05010101FFFF0001;");
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0002;",
+        ":X194C522AN05010101FFFF0002;");
 }
 
 TEST_F(ConfiguredFlashingConsumerTest, IdentifyConsumerFlashing)
 {
     create_consumer();
 
-    // Start flashing.
+    send_packet(":X195B4001N05010101FFFF0001;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+
+    // Flashing: event_flashing = VALID, others INVALID.
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0001;",
+        ":X194C422AN05010101FFFF0001;");
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0000;",
+        ":X194C522AN05010101FFFF0000;");
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0002;",
+        ":X194C522AN05010101FFFF0002;");
+}
+
+TEST_F(ConfiguredFlashingConsumerTest, GlobalIdentifyOff)
+{
+    create_consumer();
+
+    // Initially off.
+    expect_packet(":X194C522AN05010101FFFF0000;"); // steady INVALID
+    expect_packet(":X194C522AN05010101FFFF0001;"); // flashing INVALID
+    expect_packet(":X194C422AN05010101FFFF0002;"); // off VALID
+    send_packet(":X19970001N;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+}
+
+TEST_F(ConfiguredFlashingConsumerTest, GlobalIdentifySteady)
+{
+    create_consumer();
+
     send_packet(":X195B4001N05010101FFFF0000;");
     wait_for_event_thread();
     Mock::VerifyAndClear(&canBus_);
 
-    // Flashing: event_on should be VALID (0x4C4), event_off INVALID (0x4C5).
-    send_packet_and_expect_response(":X198F4001N05010101FFFF0000;",
-        ":X194C422AN05010101FFFF0000;");
-    send_packet_and_expect_response(":X198F4001N05010101FFFF0001;",
-        ":X194C522AN05010101FFFF0001;");
-}
-
-TEST_F(ConfiguredFlashingConsumerTest, GlobalIdentifyNotFlashing)
-{
-    create_consumer();
-
-    // event_on INVALID, event_off VALID.
-    expect_packet(":X194C522AN05010101FFFF0000;");
-    expect_packet(":X194C422AN05010101FFFF0001;");
+    expect_packet(":X194C422AN05010101FFFF0000;"); // steady VALID
+    expect_packet(":X194C522AN05010101FFFF0001;"); // flashing INVALID
+    expect_packet(":X194C522AN05010101FFFF0002;"); // off INVALID
     send_packet(":X19970001N;");
     wait_for_event_thread();
     Mock::VerifyAndClear(&canBus_);
@@ -346,44 +490,16 @@ TEST_F(ConfiguredFlashingConsumerTest, GlobalIdentifyFlashing)
 {
     create_consumer();
 
-    // Start flashing.
-    send_packet(":X195B4001N05010101FFFF0000;");
+    send_packet(":X195B4001N05010101FFFF0001;");
     wait_for_event_thread();
     Mock::VerifyAndClear(&canBus_);
 
-    // event_on VALID, event_off INVALID.
-    expect_packet(":X194C422AN05010101FFFF0000;");
-    expect_packet(":X194C522AN05010101FFFF0001;");
+    expect_packet(":X194C522AN05010101FFFF0000;"); // steady INVALID
+    expect_packet(":X194C422AN05010101FFFF0001;"); // flashing VALID
+    expect_packet(":X194C522AN05010101FFFF0002;"); // off INVALID
     send_packet(":X19970001N;");
     wait_for_event_thread();
     Mock::VerifyAndClear(&canBus_);
-}
-
-TEST_F(ConfiguredFlashingConsumerTest, DoubleOnEvent)
-{
-    create_consumer(3);
-
-    // Start flashing.
-    send_packet(":X195B4001N05010101FFFF0000;");
-    wait_for_event_thread();
-    EXPECT_TRUE(pin0_.is_set());
-
-    // Run a few ticks so we're partway through a cycle.
-    run_poll_cycles(2);
-    EXPECT_TRUE(pin0_.is_set());
-
-    // Send ON again -- should reset the cycle (pin stays high, counter
-    // reloads).
-    send_packet(":X195B4001N05010101FFFF0000;");
-    wait_for_event_thread();
-    EXPECT_TRUE(pin0_.is_set());
-    EXPECT_TRUE(consumer_->is_flashing());
-
-    // Should need full period+1 ticks before first toggle.
-    run_poll_cycles(3);
-    EXPECT_TRUE(pin0_.is_set());
-    run_poll_cycles(1);
-    EXPECT_FALSE(pin0_.is_set());
 }
 
 } // namespace openlcb
