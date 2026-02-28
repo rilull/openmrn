@@ -102,6 +102,33 @@ public:
         ConfigUpdateService::instance()->register_update_listener(this);
     }
 
+    /// Constructor with an "all off" event. When the all-off event is
+    /// received, every output in the group is turned off.
+    /// @param node is the OpenLCB node object from the stack.
+    /// @param pins is the list of pins represented by the Gpio* object
+    /// instances. Can be constant from FLASH space.
+    /// @param size is the length of the list of pins array.
+    /// @param all_off_event is the CDI entry for the "all off" event.
+    /// @param config is the repeated group object from the configuration space
+    /// that represents the locations of the events.
+    template <unsigned N>
+    __attribute__((noinline)) ConfiguredExclusiveConsumer(Node *node,
+        const Gpio *const *pins, unsigned size,
+        const EventConfigEntry &all_off_event,
+        const RepeatedGroup<config_entry_type, N> &config)
+        : node_(node)
+        , pins_(pins)
+        , size_(N)
+        , activeIndex_(NONE_ACTIVE)
+        , offset_(config)
+        , allOffOffset_(all_off_event)
+        , hasAllOff_(true)
+    {
+        // Mismatched sizing of the GPIO array from the configuration array.
+        HASSERT(size == N);
+        ConfigUpdateService::instance()->register_update_listener(this);
+    }
+
     ~ConfiguredExclusiveConsumer()
     {
         do_unregister();
@@ -116,6 +143,13 @@ public:
         if (!initial_load)
         {
             do_unregister();
+        }
+        if (hasAllOff_)
+        {
+            EventConfigEntry all_off_cfg(allOffOffset_.offset());
+            EventId all_off_event = all_off_cfg.read(fd);
+            EventRegistry::instance()->register_handler(
+                EventRegistryEntry(this, all_off_event, NONE_ACTIVE), 0);
         }
         RepeatedGroup<config_entry_type, UINT_MAX> grp_ref(offset_.offset());
         for (unsigned i = 0; i < size_; ++i)
@@ -196,8 +230,11 @@ public:
                 pins_[i]->clr();
             }
         }
-        // Turn on the selected output.
-        pins_[selected]->set();
+        if (selected < size_)
+        {
+            // Turn on the selected output.
+            pins_[selected]->set();
+        }
         activeIndex_ = selected;
 
         done->notify();
@@ -233,8 +270,9 @@ private:
     const Gpio *const *pins_; //< array of all GPIO pins to use
     size_t size_;             //< number of GPIO pins to export
     unsigned activeIndex_;    //< currently active output, or NONE_ACTIVE
-    ConfigReference offset_;  //< Offset in the configuration space for our
-    // configs.
+    ConfigReference offset_;  //< offset in the configuration space
+    ConfigReference allOffOffset_{0}; //< offset for the all-off event
+    bool hasAllOff_{false};   //< true if this group has an all-off event
 };
 
 } // namespace openlcb

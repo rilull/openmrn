@@ -516,4 +516,282 @@ TEST_F(ConfiguredExclusiveFlashingConsumerTest, UnrelatedEventIgnored)
     EXPECT_FALSE(pin2_.is_set());
 }
 
+// ======================================================================
+// Tests for the "all off" event feature.
+// ======================================================================
+
+/// Test fixture for ConfiguredExclusiveFlashingConsumer with an all-off event.
+class ExclusiveFlashingAllOffTest : public AsyncNodeTest
+{
+protected:
+    ~ExclusiveFlashingAllOffTest()
+    {
+        wait_for_event_thread();
+        if (fd_ >= 0)
+        {
+            ::close(fd_);
+        }
+        unlink(tempFile_);
+    }
+
+    /// Creates a temporary config file with an all-off event followed by 3
+    /// output entries, then initializes the consumer.
+    /// @param on_period flash on-time for all outputs (default 3).
+    /// @param off_period flash off-time for all outputs (default 3).
+    void create_consumer(uint8_t on_period = 3, uint8_t off_period = 3)
+    {
+        fd_ = mkstemp(tempFile_);
+        ASSERT_GE(fd_, 0);
+
+        // Layout:
+        //   8 bytes: all-off event ID (EventConfigEntry, big-endian)
+        //   3 x 26 bytes: ExclusiveFlashingConsumerConfig entries
+        // Total: 86 bytes.
+
+        static const unsigned kEntrySize = 26;
+        uint8_t buf[8 + kEntrySize * 3];
+        memset(buf, 0, sizeof(buf));
+
+        // All-off event at offset 0.
+        uint64_t evOff = htobe64(kAllOffEvent);
+        memcpy(buf + 0, &evOff, 8);
+
+        for (unsigned i = 0; i < 3; ++i)
+        {
+            unsigned base = 8 + i * kEntrySize;
+            // event (steady) at base + 8.
+            uint64_t ev_steady = htobe64(kEventBase + i * 2);
+            memcpy(buf + base + 8, &ev_steady, 8);
+            // event_flashing at base + 16.
+            uint64_t ev_flash = htobe64(kEventBase + i * 2 + 1);
+            memcpy(buf + base + 16, &ev_flash, 8);
+            // on_period at base + 24.
+            buf[base + 24] = on_period;
+            // off_period at base + 25.
+            buf[base + 25] = off_period;
+        }
+
+        ASSERT_EQ((ssize_t)sizeof(buf), ::write(fd_, buf, sizeof(buf)));
+        ::lseek(fd_, 0, SEEK_SET);
+
+        updateFlow_.TEST_set_fd(fd_);
+
+        consumer_.reset(new ConfiguredExclusiveFlashingConsumer(
+            node_, kPins, 3, allOffCfg_, cfg_));
+
+        wait_for_main_executor();
+        wait_for_event_thread();
+    }
+
+    void run_poll_cycles(unsigned count)
+    {
+        for (unsigned i = 0; i < count; ++i)
+        {
+            SyncNotifiable n;
+            consumer_->poll_33hz(&helper_, &n);
+            n.wait_for_notification();
+        }
+    }
+
+    static string event_hex(uint64_t event)
+    {
+        char buf[17];
+        snprintf(buf, sizeof(buf), "%016llX",
+                 (unsigned long long)event);
+        return string(buf);
+    }
+
+    void send_event(uint64_t event)
+    {
+        string pkt = ":X195B4001N" + event_hex(event) + ";";
+        send_packet(pkt.c_str());
+        wait_for_event_thread();
+    }
+
+    static const uint64_t kAllOffEvent = 0x05010101FFFF00F0ULL;
+
+    uint32_t gpioStorage_{0};
+
+    MmapGpio pin0_{&gpioStorage_, 0, true};
+    MmapGpio pin1_{&gpioStorage_, 1, true};
+    MmapGpio pin2_{&gpioStorage_, 2, true};
+
+    const Gpio *const kPins[3]{&pin0_, &pin1_, &pin2_};
+
+    /// All-off event config at offset 0.
+    EventConfigEntry allOffCfg_{0};
+    /// Output entries at offset 8.
+    RepeatedGroup<ExclusiveFlashingConsumerConfig, 3> cfg_{8};
+
+    ConfigUpdateFlow updateFlow_{ifCan_.get()};
+    WriteHelper helper_;
+    std::unique_ptr<ConfiguredExclusiveFlashingConsumer> consumer_;
+
+    int fd_{-1};
+    char tempFile_[40] = "/tmp/exfl_ao_XXXXXX";
+};
+
+TEST_F(ExclusiveFlashingAllOffTest, CreateDestroy)
+{
+    create_consumer();
+}
+
+TEST_F(ExclusiveFlashingAllOffTest, AllOffFromSteady)
+{
+    create_consumer();
+
+    // Steady red.
+    send_event(kEventBase + 0);
+    EXPECT_TRUE(pin0_.is_set());
+
+    // All off.
+    send_event(kAllOffEvent);
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+}
+
+TEST_F(ExclusiveFlashingAllOffTest, AllOffFromFlashing)
+{
+    create_consumer(3, 3);
+
+    // Flashing red.
+    send_event(kEventBase + 1);
+    EXPECT_TRUE(pin0_.is_set());
+
+    run_poll_cycles(2);
+
+    // All off.
+    send_event(kAllOffEvent);
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+
+    // Polling should not cause any output to turn on.
+    run_poll_cycles(20);
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+}
+
+TEST_F(ExclusiveFlashingAllOffTest, AllOffThenReactivateSteady)
+{
+    create_consumer();
+
+    // Steady yellow.
+    send_event(kEventBase + 2);
+    EXPECT_TRUE(pin1_.is_set());
+
+    // All off.
+    send_event(kAllOffEvent);
+    EXPECT_FALSE(pin1_.is_set());
+
+    // Steady green.
+    send_event(kEventBase + 4);
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_TRUE(pin2_.is_set());
+}
+
+TEST_F(ExclusiveFlashingAllOffTest, AllOffThenReactivateFlashing)
+{
+    create_consumer(3, 3);
+
+    // Steady red.
+    send_event(kEventBase + 0);
+    EXPECT_TRUE(pin0_.is_set());
+
+    // All off.
+    send_event(kAllOffEvent);
+    EXPECT_FALSE(pin0_.is_set());
+
+    // Flashing yellow.
+    send_event(kEventBase + 3);
+    EXPECT_TRUE(pin1_.is_set());
+
+    // Should flash.
+    run_poll_cycles(4);
+    EXPECT_FALSE(pin1_.is_set());
+}
+
+TEST_F(ExclusiveFlashingAllOffTest, IdentifyAllOffValidInitially)
+{
+    create_consumer();
+
+    // Initially no output is active, so all-off should be VALID.
+    string req = ":X198F4001N" + event_hex(kAllOffEvent) + ";";
+    string resp = ":X194C422AN" + event_hex(kAllOffEvent) + ";";
+    send_packet_and_expect_response(req.c_str(), resp.c_str());
+}
+
+TEST_F(ExclusiveFlashingAllOffTest, IdentifyAllOffInvalidWhenActive)
+{
+    create_consumer();
+
+    // Steady red.
+    send_event(kEventBase + 0);
+    Mock::VerifyAndClear(&canBus_);
+
+    // All-off should be INVALID.
+    string req = ":X198F4001N" + event_hex(kAllOffEvent) + ";";
+    string resp = ":X194C522AN" + event_hex(kAllOffEvent) + ";";
+    send_packet_and_expect_response(req.c_str(), resp.c_str());
+}
+
+TEST_F(ExclusiveFlashingAllOffTest, IdentifyAllOffValidAfterAllOff)
+{
+    create_consumer();
+
+    // Steady red.
+    send_event(kEventBase + 0);
+    Mock::VerifyAndClear(&canBus_);
+
+    // All off.
+    send_event(kAllOffEvent);
+    Mock::VerifyAndClear(&canBus_);
+
+    // All-off should be VALID again.
+    string req = ":X198F4001N" + event_hex(kAllOffEvent) + ";";
+    string resp = ":X194C422AN" + event_hex(kAllOffEvent) + ";";
+    send_packet_and_expect_response(req.c_str(), resp.c_str());
+}
+
+TEST_F(ExclusiveFlashingAllOffTest, GlobalIdentifyAllOff)
+{
+    create_consumer();
+
+    // All outputs off (initial state).
+    // Global identify should produce 7 messages:
+    // all-off VALID, 3 outputs x 2 events each = 6 INVALID.
+    expect_packet(":X194C422AN" + event_hex(kAllOffEvent) + ";");
+    for (unsigned i = 0; i < 6; ++i)
+    {
+        expect_packet(":X194C522AN" + event_hex(kEventBase + i) + ";");
+    }
+    send_packet(":X19970001N;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+}
+
+TEST_F(ExclusiveFlashingAllOffTest, GlobalIdentifyWithSteadyActive)
+{
+    create_consumer();
+
+    // Steady green (event +4).
+    send_event(kEventBase + 4);
+    Mock::VerifyAndClear(&canBus_);
+
+    // Global identify: all-off INVALID, green steady VALID, rest INVALID.
+    expect_packet(":X194C522AN" + event_hex(kAllOffEvent) + ";");
+    expect_packet(":X194C522AN" + event_hex(kEventBase + 0) + ";");
+    expect_packet(":X194C522AN" + event_hex(kEventBase + 1) + ";");
+    expect_packet(":X194C522AN" + event_hex(kEventBase + 2) + ";");
+    expect_packet(":X194C522AN" + event_hex(kEventBase + 3) + ";");
+    expect_packet(":X194C422AN" + event_hex(kEventBase + 4) + ";");
+    expect_packet(":X194C522AN" + event_hex(kEventBase + 5) + ";");
+    send_packet(":X19970001N;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+}
+
 } // namespace openlcb

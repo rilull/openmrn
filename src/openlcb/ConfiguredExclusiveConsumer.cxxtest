@@ -295,4 +295,225 @@ TEST_F(ConfiguredExclusiveConsumerTest, GlobalIdentify)
     Mock::VerifyAndClear(&canBus_);
 }
 
+// ======================================================================
+// Tests for the "all off" event feature.
+// ======================================================================
+
+/// Test fixture for ConfiguredExclusiveConsumer with an all-off event.
+class ExclusiveConsumerAllOffTest : public AsyncNodeTest
+{
+protected:
+    ~ExclusiveConsumerAllOffTest()
+    {
+        wait_for_event_thread();
+        if (fd_ >= 0)
+        {
+            ::close(fd_);
+        }
+        unlink(tempFile_);
+    }
+
+    /// Creates a temporary config file with an all-off event followed by 3
+    /// output entries, then initializes the consumer.
+    void create_consumer()
+    {
+        fd_ = mkstemp(tempFile_);
+        ASSERT_GE(fd_, 0);
+
+        // Layout:
+        //   8 bytes: all-off event ID (EventConfigEntry, big-endian)
+        //   3 x 16 bytes: ExclusiveConsumerConfig entries
+        // Total: 56 bytes.
+
+        uint8_t buf[56];
+        memset(buf, 0, sizeof(buf));
+
+        // All-off event at offset 0.
+        uint64_t evOff = htobe64(kAllOffEvent);
+        memcpy(buf + 0, &evOff, 8);
+
+        // Entry 0 event at offset 8 + 8 = 16.
+        uint64_t ev0 = htobe64(kEventBase);
+        memcpy(buf + 16, &ev0, 8);
+        // Entry 1 event at offset 8 + 24 = 32.
+        uint64_t ev1 = htobe64(kEventBase + 1);
+        memcpy(buf + 32, &ev1, 8);
+        // Entry 2 event at offset 8 + 40 = 48.
+        uint64_t ev2 = htobe64(kEventBase + 2);
+        memcpy(buf + 48, &ev2, 8);
+
+        ASSERT_EQ((ssize_t)sizeof(buf), ::write(fd_, buf, sizeof(buf)));
+        ::lseek(fd_, 0, SEEK_SET);
+
+        updateFlow_.TEST_set_fd(fd_);
+
+        consumer_.reset(new ConfiguredExclusiveConsumer(
+            node_, kPins, 3, allOffCfg_, cfg_));
+
+        wait_for_main_executor();
+        wait_for_event_thread();
+    }
+
+    static const uint64_t kAllOffEvent = 0x05010101FFFF00F0ULL;
+
+    uint32_t gpioStorage_{0};
+
+    MmapGpio pin0_{&gpioStorage_, 0, true};
+    MmapGpio pin1_{&gpioStorage_, 1, true};
+    MmapGpio pin2_{&gpioStorage_, 2, true};
+
+    const Gpio *const kPins[3]{&pin0_, &pin1_, &pin2_};
+
+    /// All-off event config at offset 0.
+    EventConfigEntry allOffCfg_{0};
+    /// Output entries at offset 8.
+    RepeatedGroup<ExclusiveConsumerConfig, 3> cfg_{8};
+
+    ConfigUpdateFlow updateFlow_{ifCan_.get()};
+    std::unique_ptr<ConfiguredExclusiveConsumer> consumer_;
+
+    int fd_{-1};
+    char tempFile_[40] = "/tmp/excl_ao_XXXXXX";
+};
+
+TEST_F(ExclusiveConsumerAllOffTest, CreateDestroy)
+{
+    create_consumer();
+}
+
+TEST_F(ExclusiveConsumerAllOffTest, AllOffFromActive)
+{
+    create_consumer();
+
+    // Activate pin 0.
+    send_packet(":X195B4001N05010101FFFF0000;");
+    wait_for_event_thread();
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+
+    // Send all-off event.
+    send_packet(":X195B4001N05010101FFFF00F0;");
+    wait_for_event_thread();
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+}
+
+TEST_F(ExclusiveConsumerAllOffTest, AllOffThenReactivate)
+{
+    create_consumer();
+
+    // Activate pin 1.
+    send_packet(":X195B4001N05010101FFFF0001;");
+    wait_for_event_thread();
+    EXPECT_TRUE(pin1_.is_set());
+
+    // All off.
+    send_packet(":X195B4001N05010101FFFF00F0;");
+    wait_for_event_thread();
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+
+    // Activate pin 2.
+    send_packet(":X195B4001N05010101FFFF0002;");
+    wait_for_event_thread();
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_TRUE(pin2_.is_set());
+}
+
+TEST_F(ExclusiveConsumerAllOffTest, AllOffWhenAlreadyOff)
+{
+    create_consumer();
+
+    // Initially all off. Send all-off event.
+    send_packet(":X195B4001N05010101FFFF00F0;");
+    wait_for_event_thread();
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+}
+
+TEST_F(ExclusiveConsumerAllOffTest, IdentifyAllOffValid)
+{
+    create_consumer();
+
+    // Initially no output is active, so all-off should be VALID (4C4).
+    send_packet_and_expect_response(":X198F4001N05010101FFFF00F0;",
+                                    ":X194C422AN05010101FFFF00F0;");
+}
+
+TEST_F(ExclusiveConsumerAllOffTest, IdentifyAllOffInvalid)
+{
+    create_consumer();
+
+    // Activate pin 0.
+    send_packet(":X195B4001N05010101FFFF0000;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+
+    // All-off should be INVALID (4C5) when an output is active.
+    send_packet_and_expect_response(":X198F4001N05010101FFFF00F0;",
+                                    ":X194C522AN05010101FFFF00F0;");
+}
+
+TEST_F(ExclusiveConsumerAllOffTest, IdentifyAfterAllOff)
+{
+    create_consumer();
+
+    // Activate pin 0.
+    send_packet(":X195B4001N05010101FFFF0000;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+
+    // All off.
+    send_packet(":X195B4001N05010101FFFF00F0;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+
+    // All-off event should be VALID.
+    send_packet_and_expect_response(":X198F4001N05010101FFFF00F0;",
+                                    ":X194C422AN05010101FFFF00F0;");
+    // Pin 0 event should be INVALID.
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0000;",
+                                    ":X194C522AN05010101FFFF0000;");
+}
+
+TEST_F(ExclusiveConsumerAllOffTest, GlobalIdentifyWithAllOff)
+{
+    create_consumer();
+
+    // All outputs off (initial state).
+    // Global identify should produce 4 ConsumerIdentified messages:
+    // all-off VALID, pin 0 INVALID, pin 1 INVALID, pin 2 INVALID.
+    expect_packet(":X194C422AN05010101FFFF00F0;"); // all-off VALID
+    expect_packet(":X194C522AN05010101FFFF0000;"); // event 0 INVALID
+    expect_packet(":X194C522AN05010101FFFF0001;"); // event 1 INVALID
+    expect_packet(":X194C522AN05010101FFFF0002;"); // event 2 INVALID
+    send_packet(":X19970001N;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+}
+
+TEST_F(ExclusiveConsumerAllOffTest, GlobalIdentifyWithOutputActive)
+{
+    create_consumer();
+
+    // Activate pin 2.
+    send_packet(":X195B4001N05010101FFFF0002;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+
+    // Global identify: all-off INVALID, pin 2 VALID, others INVALID.
+    expect_packet(":X194C522AN05010101FFFF00F0;"); // all-off INVALID
+    expect_packet(":X194C522AN05010101FFFF0000;"); // event 0 INVALID
+    expect_packet(":X194C522AN05010101FFFF0001;"); // event 1 INVALID
+    expect_packet(":X194C422AN05010101FFFF0002;"); // event 2 VALID
+    send_packet(":X19970001N;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+}
+
 } // namespace openlcb

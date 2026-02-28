@@ -341,7 +341,8 @@ constexpr const Gpio *const kPortDExclFlash1Gpio[] = {
 
 openlcb::ConfiguredExclusiveFlashingConsumer portd_excl_flash_1(stack.node(),
     kPortDExclFlash1Gpio, ARRAYSIZE(kPortDExclFlash1Gpio),
-    cfg.seg().portd_excl_flash_1());
+    cfg.seg().portd_excl_flash_1().event_all_off(),
+    cfg.seg().portd_excl_flash_1().entries());
 
 /// Port D lines 5, 6, 7, 8 — exclusive flashing group 2.
 constexpr const Gpio *const kPortDExclFlash2Gpio[] = {
@@ -350,7 +351,8 @@ constexpr const Gpio *const kPortDExclFlash2Gpio[] = {
 
 openlcb::ConfiguredExclusiveFlashingConsumer portd_excl_flash_2(stack.node(),
     kPortDExclFlash2Gpio, ARRAYSIZE(kPortDExclFlash2Gpio),
-    cfg.seg().portd_excl_flash_2());
+    cfg.seg().portd_excl_flash_2().event_all_off(),
+    cfg.seg().portd_excl_flash_2().entries());
 
 // ======================================================================
 // Port E standalone flashing outputs: lines 1-8.

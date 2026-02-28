@@ -27,7 +27,7 @@ namespace openlcb
 /// - the Simple Node Ident Info Protocol will return this data
 /// - the ACDI memory space will contain this data.
 extern const SimpleNodeStaticValues SNIP_STATIC_DATA = {
-    4, "OpenMRN", "OpenLCB DevKit + Nucleo F303 dev board", "Rev A", "1.03"};
+    4, "OpenMRN", "OpenLCB DevKit + Nucleo F303 dev board", "Rev A", "1.04"};
 
 #define NUM_OUTPUTS 16
 #define NUM_INPUTS 1
@@ -69,6 +69,17 @@ using PulseConsumers = RepeatedGroup<PulseConsumerConfig, 8>;
 using ExclusiveFlashingGroup4 =
     RepeatedGroup<ExclusiveFlashingConsumerConfig, 4>;
 
+/// Wrapper CDI group for exclusive flashing consumer group of 4 with an
+/// all-off event. The all-off event turns off every output in the group.
+CDI_GROUP(ExclFlashGroup4WithAllOff);
+CDI_GROUP_ENTRY(event_all_off, EventConfigEntry,
+    Name("Event All Off"),
+    Description("Receiving this event ID will turn off all outputs in "
+                "this group."));
+CDI_GROUP_ENTRY(entries, ExclusiveFlashingGroup4,
+    RepName("Line"));
+CDI_GROUP_END();
+
 /// Standalone flashing consumers for Port E: each line independently
 /// configurable with steady-on, flashing, or off.
 using PortEFlashing = RepeatedGroup<FlashingConsumerConfig, 8>;
@@ -87,7 +98,7 @@ using Ext0PC = RepeatedGroup<PCConfig, 16 * NUM_MCPIOS>;
 
 /// Modify this value every time the EEPROM needs to be cleared on the node
 /// after an update.
-static constexpr uint16_t CANONICAL_VERSION = 0x11B0 + NUM_MCPIOS;
+static constexpr uint16_t CANONICAL_VERSION = 0x11C0 + NUM_MCPIOS;
 
 CDI_GROUP(NucleoGroup, Name("Nucleo peripherals"), Description("These are physically located on the nucleo CPU daughterboard."));
 CDI_GROUP_ENTRY(green_led, ConsumerConfig, Name("Nucleo user LED"), Description("Green led (LD2)."));
@@ -108,16 +119,14 @@ CDI_GROUP_ENTRY(snap_switches, PulseConsumers, Name("Consumers for snap switches
 //CDI_GROUP_ENTRY(direct_consumers, DirectConsumers, Name("Tortoise/Hi-Power outputs"), RepName("Line"));
 //CDI_GROUP_ENTRY(servo_consumers, ServoConsumers, Name("Servo Pin outputs"), Description("3-pin servo outputs."), RepName("Line"));
 //CDI_GROUP_ENTRY(hidden_servo_5_8, ServoConsumers, Hidden(true));
-CDI_GROUP_ENTRY(portd_excl_flash_1, ExclusiveFlashingGroup4,
+CDI_GROUP_ENTRY(portd_excl_flash_1, ExclFlashGroup4WithAllOff,
     Name("Port D exclusive flashing group 1"),
     Description("Lines 1-4 on port D. Only one output is active at a time. "
-                "Each output can be steady or flashing."),
-    RepName("Line"));
-CDI_GROUP_ENTRY(portd_excl_flash_2, ExclusiveFlashingGroup4,
+                "Each output can be steady or flashing."));
+CDI_GROUP_ENTRY(portd_excl_flash_2, ExclFlashGroup4WithAllOff,
     Name("Port D exclusive flashing group 2"),
     Description("Lines 5-8 on port D. Only one output is active at a time. "
-                "Each output can be steady or flashing."),
-    RepName("Line"));
+                "Each output can be steady or flashing."));
 CDI_GROUP_ENTRY(porte_flash, PortEFlashing,
     Name("Port E flashing outputs"),
     Description("Lines 1-8 on port E. Each output independently supports "

@@ -138,6 +138,41 @@ public:
         ConfigUpdateService::instance()->register_update_listener(this);
     }
 
+    /// Constructor with an "all off" event. When the all-off event is
+    /// received, every output in the group is turned off and flashing stops.
+    /// @param node is the OpenLCB node object from the stack.
+    /// @param pins is the list of pins represented by the Gpio* object
+    /// instances. Can be constant from FLASH space.
+    /// @param size is the length of the list of pins array.
+    /// @param all_off_event is the CDI entry for the "all off" event.
+    /// @param config is the repeated group object from the configuration space
+    /// that represents the locations of the events.
+    template <unsigned N>
+    __attribute__((noinline)) ConfiguredExclusiveFlashingConsumer(Node *node,
+        const Gpio *const *pins, unsigned size,
+        const EventConfigEntry &all_off_event,
+        const RepeatedGroup<config_entry_type, N> &config)
+        : node_(node)
+        , pins_(pins)
+        , size_(N)
+        , activeIndex_(NONE_ACTIVE)
+        , activeFlashing_(false)
+        , pinState_(false)
+        , remaining_(0)
+        , onPeriod_(17)
+        , offPeriod_(17)
+        , offset_(config)
+        , allOffOffset_(all_off_event)
+        , hasAllOff_(true)
+    {
+        HASSERT(size == N);
+        onPeriods_ = new uint8_t[N];
+        offPeriods_ = new uint8_t[N];
+        memset(onPeriods_, 17, N);
+        memset(offPeriods_, 17, N);
+        ConfigUpdateService::instance()->register_update_listener(this);
+    }
+
     ~ConfiguredExclusiveFlashingConsumer()
     {
         do_unregister();
@@ -154,6 +189,13 @@ public:
         if (!initial_load)
         {
             do_unregister();
+        }
+        if (hasAllOff_)
+        {
+            EventConfigEntry all_off_cfg(allOffOffset_.offset());
+            EventId all_off_event = all_off_cfg.read(fd);
+            EventRegistry::instance()->register_handler(
+                EventRegistryEntry(this, all_off_event, NONE_ACTIVE), 0);
         }
         RepeatedGroup<config_entry_type, UINT_MAX> grp_ref(offset_.offset());
         for (unsigned i = 0; i < size_; ++i)
@@ -243,33 +285,42 @@ public:
             return done->notify();
         }
 
-        unsigned output_idx = registry_entry.user_arg / 2;
-        bool is_flash = (registry_entry.user_arg & 1) != 0;
-
         // Turn off all outputs in the group.
         for (unsigned i = 0; i < size_; ++i)
         {
             pins_[i]->clr();
         }
 
-        activeIndex_ = output_idx;
-        activeFlashing_ = is_flash;
-
-        if (is_flash)
+        if (registry_entry.user_arg == NONE_ACTIVE)
         {
-            // Start flashing: begin with pin on.
-            onPeriod_ = onPeriods_[output_idx];
-            offPeriod_ = offPeriods_[output_idx];
-            pinState_ = true;
-            remaining_ = onPeriod_;
-            pins_[output_idx]->set();
+            // All-off event: just clear everything.
+            activeIndex_ = NONE_ACTIVE;
+            activeFlashing_ = false;
         }
         else
         {
-            // Steady on.
-            pinState_ = true;
-            remaining_ = 0;
-            pins_[output_idx]->set();
+            unsigned output_idx = registry_entry.user_arg / 2;
+            bool is_flash = (registry_entry.user_arg & 1) != 0;
+
+            activeIndex_ = output_idx;
+            activeFlashing_ = is_flash;
+
+            if (is_flash)
+            {
+                // Start flashing: begin with pin on.
+                onPeriod_ = onPeriods_[output_idx];
+                offPeriod_ = offPeriods_[output_idx];
+                pinState_ = true;
+                remaining_ = onPeriod_;
+                pins_[output_idx]->set();
+            }
+            else
+            {
+                // Steady on.
+                pinState_ = true;
+                remaining_ = 0;
+                pins_[output_idx]->set();
+            }
         }
 
         done->notify();
@@ -312,13 +363,23 @@ private:
     void SendConsumerIdentified(const EventRegistryEntry &registry_entry,
         EventReport *event, BarrierNotifiable *done)
     {
-        unsigned output_idx = registry_entry.user_arg / 2;
-        bool is_flash_event = (registry_entry.user_arg & 1) != 0;
-
         Defs::MTI mti = Defs::MTI_CONSUMER_IDENTIFIED_VALID;
-        bool is_valid =
-            (output_idx == activeIndex_) &&
-            (is_flash_event == activeFlashing_);
+        bool is_valid;
+
+        if (registry_entry.user_arg == NONE_ACTIVE)
+        {
+            // All-off event: valid when no output is active.
+            is_valid = (activeIndex_ == NONE_ACTIVE);
+        }
+        else
+        {
+            unsigned output_idx = registry_entry.user_arg / 2;
+            bool is_flash_event = (registry_entry.user_arg & 1) != 0;
+            is_valid =
+                (output_idx == activeIndex_) &&
+                (is_flash_event == activeFlashing_);
+        }
+
         if (!is_valid)
         {
             mti++; // INVALID
@@ -347,6 +408,8 @@ private:
     uint8_t *onPeriods_;      //< cached per-output on periods
     uint8_t *offPeriods_;     //< cached per-output off periods
     ConfigReference offset_;  //< offset in the configuration space
+    ConfigReference allOffOffset_{0}; //< offset for the all-off event
+    bool hasAllOff_{false};   //< true if this group has an all-off event
 };
 
 } // namespace openlcb
