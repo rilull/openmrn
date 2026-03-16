@@ -45,7 +45,9 @@
 #include "openlcb/MultiConfiguredConsumer.hxx"
 #include "openlcb/ConfiguredExclusiveConsumer.hxx"
 #include "openlcb/ConfiguredProducer.hxx"
+#include "openlcb/DefinedSignalMast.hxx"
 #include "openlcb/ServoConsumer.hxx"
+#include "openlcb/SignalTypes_CSX1998.hxx"
 
 #include "freertos_drivers/st/Stm32Gpio.hxx"
 #include "freertos_drivers/common/BlinkerGPIO.hxx"
@@ -333,48 +335,40 @@ constexpr const MmapGpio PORTE_LINE7(output_register, 9, true);
 constexpr const MmapGpio PORTE_LINE8(output_register, 8, true);
 
 // ======================================================================
-// Port D exclusive groups: lines 1-4 and 5-8 are mutually exclusive.
+// Port D: CSX 1998 Double Head 4-4 Color Light Signal Mast
+// Upper head: Green(D1), Yellow(D2), Red(D3), Lunar(D4)
+// Lower head: Green(D5), Yellow(D6), Red(D7), Lunar(D8)
 // ======================================================================
 
-/// Port D lines 1, 2, 3, 4 — exclusive group 1.
-constexpr const Gpio *const kPortDExcl1Gpio[] = {
-    &PORTD_LINE1, &PORTD_LINE2, &PORTD_LINE3, &PORTD_LINE4,
+constexpr const Gpio *const kPortDSignalGpio[] = {
+    &PORTD_LINE1, &PORTD_LINE2, &PORTD_LINE3, &PORTD_LINE4, // upper: G Y R L
+    &PORTD_LINE5, &PORTD_LINE6, &PORTD_LINE7, &PORTD_LINE8, // lower: G Y R L
 };
 
-openlcb::ConfiguredExclusiveConsumer portd_excl_1(stack.node(),
-    kPortDExcl1Gpio, ARRAYSIZE(kPortDExcl1Gpio),
-    cfg.seg().portd_excl_1());
-
-/// Port D lines 5, 6, 7, 8 — exclusive group 2.
-constexpr const Gpio *const kPortDExcl2Gpio[] = {
-    &PORTD_LINE5, &PORTD_LINE6, &PORTD_LINE7, &PORTD_LINE8,
-};
-
-openlcb::ConfiguredExclusiveConsumer portd_excl_2(stack.node(),
-    kPortDExcl2Gpio, ARRAYSIZE(kPortDExcl2Gpio),
-    cfg.seg().portd_excl_2());
+openlcb::DefinedSignalMast<openlcb::CSX_1998_44_NUM_LEDS,
+    openlcb::CSX_1998_44_NUM_ASPECTS>
+    portd_signal(stack.node(), kPortDSignalGpio, ARRAYSIZE(kPortDSignalGpio),
+        openlcb::CSX_1998_44_ASPECTS, openlcb::CSX_1998_44_ASPECT_NAMES,
+        cfg.seg().portd_signal());
 
 // ======================================================================
-// Port E exclusive groups: lines 1-4 and 5-8 are mutually exclusive.
+// Port E: CSX 1998 Triple Head 3-3-2A Color Light Signal Mast
+// Upper head:  Green(E1), Yellow(E2), Red(E3)
+// Middle head: Green(E4), Yellow(E5), Red(E6)
+// Lower head:  Yellow(E7), Red(E8)
 // ======================================================================
 
-/// Port E lines 1, 2, 3, 4 — exclusive group 1.
-constexpr const Gpio *const kPortEExcl1Gpio[] = {
-    &PORTE_LINE1, &PORTE_LINE2, &PORTE_LINE3, &PORTE_LINE4,
+constexpr const Gpio *const kPortESignalGpio[] = {
+    &PORTE_LINE1, &PORTE_LINE2, &PORTE_LINE3, // upper: G Y R
+    &PORTE_LINE4, &PORTE_LINE5, &PORTE_LINE6, // middle: G Y R
+    &PORTE_LINE7, &PORTE_LINE8,               // lower: Y R
 };
 
-openlcb::ConfiguredExclusiveConsumer porte_excl_1(stack.node(),
-    kPortEExcl1Gpio, ARRAYSIZE(kPortEExcl1Gpio),
-    cfg.seg().porte_excl_1());
-
-/// Port E lines 5, 6, 7, 8 — exclusive group 2.
-constexpr const Gpio *const kPortEExcl2Gpio[] = {
-    &PORTE_LINE5, &PORTE_LINE6, &PORTE_LINE7, &PORTE_LINE8,
-};
-
-openlcb::ConfiguredExclusiveConsumer porte_excl_2(stack.node(),
-    kPortEExcl2Gpio, ARRAYSIZE(kPortEExcl2Gpio),
-    cfg.seg().porte_excl_2());
+openlcb::DefinedSignalMast<openlcb::CSX_1998_332A_NUM_LEDS,
+    openlcb::CSX_1998_332A_NUM_ASPECTS>
+    porte_signal(stack.node(), kPortESignalGpio, ARRAYSIZE(kPortESignalGpio),
+        openlcb::CSX_1998_332A_ASPECTS, openlcb::CSX_1998_332A_ASPECT_NAMES,
+        cfg.seg().porte_signal());
 
 #ifdef PORTD_SNAP
 
@@ -683,6 +677,8 @@ openlcb::RefreshLoop loopab(stack.node(),
         producer_b3.polling(), producer_b4.polling(), //
         producer_b5.polling(), producer_b6.polling(), //
         producer_b7.polling(), producer_b8.polling(), //
+        portd_signal.polling(),                       //
+        porte_signal.polling(),                       //
 #ifdef PORTD_SNAP
 	&turnout_pulse_consumer_1,                    //
         &turnout_pulse_consumer_2,                    //

@@ -1,0 +1,424 @@
+/** \copyright
+ * Copyright (c) 2025, Rick Lull
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are  permitted provided that the following conditions are met:
+ *
+ *  - Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ *
+ *  - Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
+ * \file DefinedSignalMast.cxxtest
+ *
+ * Unit tests for DefinedSignalMast.
+ *
+ * @author Rick Lull
+ * @date 16 Mar 2026
+ */
+
+#include "utils/async_if_test_helper.hxx"
+
+#include "openlcb/DefinedSignalMast.hxx"
+#include "openlcb/ConfigUpdateFlow.hxx"
+#include "os/MmapGpio.hxx"
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+namespace openlcb
+{
+
+static const uint64_t kEventBase = 0x05010101FFFF0000ULL;
+
+/// Simple 4-LED, 3-aspect test signal.
+/// LED layout: Green(0), Yellow(1), Red(2), Lunar(3)
+static constexpr unsigned TEST_NUM_LEDS = 4;
+static constexpr unsigned TEST_NUM_ASPECTS = 3;
+
+static constexpr SignalAspect<TEST_NUM_LEDS> kTestAspects[] = {
+    /* Clear  */ {{I, O, O, O}},
+    /* Approach */ {{O, I, O, O}},
+    /* Stop   */ {{O, O, I, O}},
+};
+
+static constexpr const char *const kTestAspectNames[] = {
+    "Clear", "Approach", "Stop",
+};
+
+/// 4-LED, 4-aspect test signal with flashing.
+static constexpr unsigned FLASH_NUM_LEDS = 4;
+static constexpr unsigned FLASH_NUM_ASPECTS = 4;
+
+static constexpr SignalAspect<FLASH_NUM_LEDS> kFlashAspects[] = {
+    /* Clear         */ {{I, O, O, O}},
+    /* Flash Yellow  */ {{O, F, O, O}},
+    /* Approach      */ {{O, I, O, O}},
+    /* Stop          */ {{O, O, I, O}},
+};
+
+static constexpr const char *const kFlashAspectNames[] = {
+    "Clear", "Flash Yellow", "Approach", "Stop",
+};
+
+/// Test fixture for DefinedSignalMast.
+class DefinedSignalMastTest : public AsyncNodeTest
+{
+protected:
+    ~DefinedSignalMastTest()
+    {
+        wait_for_event_thread();
+        if (fd_ >= 0)
+        {
+            ::close(fd_);
+        }
+        unlink(tempFile_);
+    }
+
+    /// Creates a temporary config file with event IDs and initializes the
+    /// signal mast. Must be called from tests after construction.
+    void create_mast()
+    {
+        fd_ = mkstemp(tempFile_);
+        ASSERT_GE(fd_, 0);
+
+        // SignalMastAspectConfig layout per entry:
+        //   20 bytes description (StringConfigEntry<20>)
+        //    8 bytes event (EventConfigEntry, big-endian)
+        // Total: 28 bytes per entry.
+
+        uint8_t buf[28 * TEST_NUM_ASPECTS];
+        memset(buf, 0, sizeof(buf));
+
+        for (unsigned i = 0; i < TEST_NUM_ASPECTS; ++i)
+        {
+            uint64_t ev = htobe64(kEventBase + i);
+            memcpy(buf + i * 28 + 20, &ev, 8);
+        }
+
+        ASSERT_EQ((ssize_t)sizeof(buf), ::write(fd_, buf, sizeof(buf)));
+        ::lseek(fd_, 0, SEEK_SET);
+
+        updateFlow_.TEST_set_fd(fd_);
+
+        mast_.reset(
+            new DefinedSignalMast<TEST_NUM_LEDS, TEST_NUM_ASPECTS>(node_,
+                kPins, TEST_NUM_LEDS, kTestAspects, kTestAspectNames, cfg_));
+
+        wait_for_main_executor();
+        wait_for_event_thread();
+    }
+
+    /// Creates a mast with flashing aspects.
+    void create_flash_mast()
+    {
+        fd_ = mkstemp(tempFile_);
+        ASSERT_GE(fd_, 0);
+
+        uint8_t buf[28 * FLASH_NUM_ASPECTS];
+        memset(buf, 0, sizeof(buf));
+
+        for (unsigned i = 0; i < FLASH_NUM_ASPECTS; ++i)
+        {
+            uint64_t ev = htobe64(kEventBase + i);
+            memcpy(buf + i * 28 + 20, &ev, 8);
+        }
+
+        ASSERT_EQ((ssize_t)sizeof(buf), ::write(fd_, buf, sizeof(buf)));
+        ::lseek(fd_, 0, SEEK_SET);
+
+        updateFlow_.TEST_set_fd(fd_);
+
+        flashMast_.reset(
+            new DefinedSignalMast<FLASH_NUM_LEDS, FLASH_NUM_ASPECTS>(node_,
+                kPins, FLASH_NUM_LEDS, kFlashAspects, kFlashAspectNames,
+                flashCfg_));
+
+        wait_for_main_executor();
+        wait_for_event_thread();
+    }
+
+    /// Simulates one call to poll_33hz.
+    void poll_once()
+    {
+        if (mast_)
+        {
+            mast_->poll_33hz(nullptr, &n_);
+            n_.wait_for_notification();
+        }
+        if (flashMast_)
+        {
+            flashMast_->poll_33hz(nullptr, &n_);
+            n_.wait_for_notification();
+        }
+    }
+
+    /// GPIO storage (4 bits).
+    uint32_t gpioStorage_{0};
+
+    /// Four GPIO outputs.
+    MmapGpio pin0_{&gpioStorage_, 0, true};
+    MmapGpio pin1_{&gpioStorage_, 1, true};
+    MmapGpio pin2_{&gpioStorage_, 2, true};
+    MmapGpio pin3_{&gpioStorage_, 3, true};
+
+    /// Pin array.
+    const Gpio *const kPins[4]{&pin0_, &pin1_, &pin2_, &pin3_};
+
+    /// Configuration group for the simple mast.
+    RepeatedGroup<SignalMastAspectConfig, TEST_NUM_ASPECTS> cfg_{0};
+
+    /// Configuration group for the flash mast.
+    RepeatedGroup<SignalMastAspectConfig, FLASH_NUM_ASPECTS> flashCfg_{0};
+
+    /// Config update flow.
+    ConfigUpdateFlow updateFlow_{ifCan_.get()};
+
+    /// The mast under test.
+    std::unique_ptr<DefinedSignalMast<TEST_NUM_LEDS, TEST_NUM_ASPECTS>> mast_;
+
+    /// Flash mast under test.
+    std::unique_ptr<DefinedSignalMast<FLASH_NUM_LEDS, FLASH_NUM_ASPECTS>>
+        flashMast_;
+
+    /// Sync notifiable for polling.
+    SyncNotifiable n_;
+
+    int fd_{-1};
+    char tempFile_[40] = "/tmp/sigm_test_XXXXXX";
+};
+
+TEST_F(DefinedSignalMastTest, CreateDestroy)
+{
+    create_mast();
+}
+
+TEST_F(DefinedSignalMastTest, InitialStateAllDark)
+{
+    create_mast();
+    // No aspect active yet, all LEDs should be off.
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+    EXPECT_FALSE(pin3_.is_set());
+}
+
+TEST_F(DefinedSignalMastTest, SelectClear)
+{
+    create_mast();
+
+    // Send event for aspect 0 (Clear): Green on, rest off.
+    send_packet(":X195B4001N05010101FFFF0000;");
+    wait_for_event_thread();
+    EXPECT_TRUE(pin0_.is_set());   // Green
+    EXPECT_FALSE(pin1_.is_set());  // Yellow
+    EXPECT_FALSE(pin2_.is_set());  // Red
+    EXPECT_FALSE(pin3_.is_set());  // Lunar
+}
+
+TEST_F(DefinedSignalMastTest, SelectApproach)
+{
+    create_mast();
+
+    // Send event for aspect 1 (Approach): Yellow on, rest off.
+    send_packet(":X195B4001N05010101FFFF0001;");
+    wait_for_event_thread();
+    EXPECT_FALSE(pin0_.is_set());  // Green
+    EXPECT_TRUE(pin1_.is_set());   // Yellow
+    EXPECT_FALSE(pin2_.is_set());  // Red
+    EXPECT_FALSE(pin3_.is_set());  // Lunar
+}
+
+TEST_F(DefinedSignalMastTest, SelectStop)
+{
+    create_mast();
+
+    // Send event for aspect 2 (Stop): Red on, rest off.
+    send_packet(":X195B4001N05010101FFFF0002;");
+    wait_for_event_thread();
+    EXPECT_FALSE(pin0_.is_set());  // Green
+    EXPECT_FALSE(pin1_.is_set());  // Yellow
+    EXPECT_TRUE(pin2_.is_set());   // Red
+    EXPECT_FALSE(pin3_.is_set());  // Lunar
+}
+
+TEST_F(DefinedSignalMastTest, AspectSwitching)
+{
+    create_mast();
+
+    // Clear
+    send_packet(":X195B4001N05010101FFFF0000;");
+    wait_for_event_thread();
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+
+    // Switch to Stop
+    send_packet(":X195B4001N05010101FFFF0002;");
+    wait_for_event_thread();
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_TRUE(pin2_.is_set());
+
+    // Switch to Approach
+    send_packet(":X195B4001N05010101FFFF0001;");
+    wait_for_event_thread();
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_TRUE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+}
+
+TEST_F(DefinedSignalMastTest, UnrelatedEventIgnored)
+{
+    create_mast();
+
+    // Activate Clear.
+    send_packet(":X195B4001N05010101FFFF0000;");
+    wait_for_event_thread();
+    EXPECT_TRUE(pin0_.is_set());
+
+    // Unrelated event should not change state.
+    send_packet(":X195B4001N05010101FFFF00FF;");
+    wait_for_event_thread();
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+}
+
+TEST_F(DefinedSignalMastTest, IdentifyConsumer)
+{
+    create_mast();
+
+    // Before any aspect is active, all should be INVALID.
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0000;",
+        ":X194C522AN05010101FFFF0000;");
+
+    // Activate Clear.
+    send_packet(":X195B4001N05010101FFFF0000;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+
+    // Clear should be VALID.
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0000;",
+        ":X194C422AN05010101FFFF0000;");
+
+    // Approach should be INVALID.
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0001;",
+        ":X194C522AN05010101FFFF0001;");
+}
+
+TEST_F(DefinedSignalMastTest, GlobalIdentify)
+{
+    create_mast();
+
+    // Activate Approach.
+    send_packet(":X195B4001N05010101FFFF0001;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+
+    // Global identify should produce 3 ConsumerIdentified messages.
+    expect_packet(":X194C522AN05010101FFFF0000;"); // Clear INVALID
+    expect_packet(":X194C422AN05010101FFFF0001;"); // Approach VALID
+    expect_packet(":X194C522AN05010101FFFF0002;"); // Stop INVALID
+    send_packet(":X19970001N;");
+    wait_for_event_thread();
+    Mock::VerifyAndClear(&canBus_);
+}
+
+TEST_F(DefinedSignalMastTest, FlashingAspect)
+{
+    create_flash_mast();
+
+    // Activate Flash Yellow (aspect 1).
+    send_packet(":X195B4001N05010101FFFF0001;");
+    wait_for_event_thread();
+
+    // Initially in flash-on phase: yellow should be on.
+    EXPECT_FALSE(pin0_.is_set());  // Green
+    EXPECT_TRUE(pin1_.is_set());   // Yellow (flashing, on phase)
+    EXPECT_FALSE(pin2_.is_set());  // Red
+
+    // Simulate 17 polls (one flash half-cycle).
+    for (int i = 0; i < 17; ++i)
+    {
+        poll_once();
+    }
+
+    // After 17 ticks, flash phase should have toggled: yellow off.
+    EXPECT_FALSE(pin1_.is_set());  // Yellow (flashing, off phase)
+    EXPECT_FALSE(pin0_.is_set());  // Green still off
+    EXPECT_FALSE(pin2_.is_set());  // Red still off
+
+    // Another 17 ticks: back to on.
+    for (int i = 0; i < 17; ++i)
+    {
+        poll_once();
+    }
+    EXPECT_TRUE(pin1_.is_set());  // Yellow back on
+}
+
+TEST_F(DefinedSignalMastTest, FlashingResetOnAspectChange)
+{
+    create_flash_mast();
+
+    // Activate Flash Yellow.
+    send_packet(":X195B4001N05010101FFFF0001;");
+    wait_for_event_thread();
+    EXPECT_TRUE(pin1_.is_set());
+
+    // Partially through a flash cycle.
+    for (int i = 0; i < 10; ++i)
+    {
+        poll_once();
+    }
+    EXPECT_TRUE(pin1_.is_set()); // Still in first half-cycle.
+
+    // Switch to Clear (non-flashing).
+    send_packet(":X195B4001N05010101FFFF0000;");
+    wait_for_event_thread();
+    EXPECT_TRUE(pin0_.is_set());   // Green on
+    EXPECT_FALSE(pin1_.is_set());  // Yellow off
+
+    // Polling should not cause any changes (no flashing in Clear).
+    for (int i = 0; i < 20; ++i)
+    {
+        poll_once();
+    }
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+}
+
+TEST_F(DefinedSignalMastTest, SteadyAspectUnaffectedByPolling)
+{
+    create_mast();
+
+    // Activate Clear (steady green).
+    send_packet(":X195B4001N05010101FFFF0000;");
+    wait_for_event_thread();
+    EXPECT_TRUE(pin0_.is_set());
+
+    // Many poll cycles should not change anything.
+    for (int i = 0; i < 50; ++i)
+    {
+        poll_once();
+    }
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+}
+
+} // namespace openlcb
