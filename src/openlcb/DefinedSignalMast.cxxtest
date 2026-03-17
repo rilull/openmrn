@@ -99,17 +99,17 @@ protected:
         ASSERT_GE(fd_, 0);
 
         // SignalMastAspectConfig layout per entry:
-        //   20 bytes description (StringConfigEntry<20>)
+        //   16 bytes description (StringConfigEntry<16>)
         //    8 bytes event (EventConfigEntry, big-endian)
-        // Total: 28 bytes per entry.
+        // Total: 24 bytes per entry.
 
-        uint8_t buf[28 * TEST_NUM_ASPECTS];
+        uint8_t buf[24 * TEST_NUM_ASPECTS];
         memset(buf, 0, sizeof(buf));
 
         for (unsigned i = 0; i < TEST_NUM_ASPECTS; ++i)
         {
             uint64_t ev = htobe64(kEventBase + i);
-            memcpy(buf + i * 28 + 20, &ev, 8);
+            memcpy(buf + i * 24 + 16, &ev, 8);
         }
 
         ASSERT_EQ((ssize_t)sizeof(buf), ::write(fd_, buf, sizeof(buf)));
@@ -131,13 +131,13 @@ protected:
         fd_ = mkstemp(tempFile_);
         ASSERT_GE(fd_, 0);
 
-        uint8_t buf[28 * FLASH_NUM_ASPECTS];
+        uint8_t buf[24 * FLASH_NUM_ASPECTS];
         memset(buf, 0, sizeof(buf));
 
         for (unsigned i = 0; i < FLASH_NUM_ASPECTS; ++i)
         {
             uint64_t ev = htobe64(kEventBase + i);
-            memcpy(buf + i * 28 + 20, &ev, 8);
+            memcpy(buf + i * 24 + 16, &ev, 8);
         }
 
         ASSERT_EQ((ssize_t)sizeof(buf), ::write(fd_, buf, sizeof(buf)));

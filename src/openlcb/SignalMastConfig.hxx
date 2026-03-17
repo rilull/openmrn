@@ -45,7 +45,7 @@ namespace openlcb
 /// from the compile-time aspect name) and an event that selects this aspect.
 CDI_GROUP(SignalMastAspectConfig);
 /// User-visible description of this aspect (e.g. "Clear", "Approach").
-CDI_GROUP_ENTRY(description, StringConfigEntry<20>, //
+CDI_GROUP_ENTRY(description, StringConfigEntry<16>, //
     Name("Aspect"), Description("Name of this signal aspect."));
 /// Event that selects this aspect.
 CDI_GROUP_ENTRY(event, EventConfigEntry, //

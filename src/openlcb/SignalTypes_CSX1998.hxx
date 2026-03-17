@@ -83,11 +83,11 @@ static constexpr SignalAspect<8> CSX_1998_44_ASPECTS[] = {
 /// Aspect names for the CSX 1998 double 4-light mast (for CDI factory reset).
 static constexpr const char *const CSX_1998_44_ASPECT_NAMES[] = {
     "Clear",
-    "Approach Limited",
+    "Appr Limited",
     "Limited Clear",
-    "Limited Approach",
+    "Limited Appr",
     "Approach Medium",
-    "Advance Approach",
+    "Adv Approach",
     "Medium Clear",
     "Approach",
     "Medium Approach",
@@ -137,13 +137,13 @@ static constexpr SignalAspect<8> CSX_1998_332A_ASPECTS[] = {
 /// Aspect names for the CSX 1998 triple 3-3-2A mast (for CDI factory reset).
 static constexpr const char *const CSX_1998_332A_ASPECT_NAMES[] = {
     "Clear",
-    "Approach Limited",
+    "Appr Limited",
     "Limited Clear",
-    "Limited Approach",
+    "Limited Appr",
     "Approach Medium",
-    "Advance Approach",
+    "Adv Approach",
     "Medium Clear",
-    "Medium Adv Approach",
+    "Med Adv Appr",
     "Approach",
     "Medium Approach",
     "Slow Approach",
