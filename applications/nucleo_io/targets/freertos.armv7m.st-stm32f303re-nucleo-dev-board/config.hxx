@@ -68,7 +68,7 @@ using ExclusiveGroup4 = RepeatedGroup<ExclusiveConsumerConfig, 4>;
 
 /// Signal mast aspect groups for CSX 1998 signal types.
 using PortDSignalAspects =
-    RepeatedGroup<SignalMastAspectConfig, CSX_1998_44_NUM_ASPECTS>;
+    RepeatedGroup<SignalMastAspectConfig, CSX_1998_33_NUM_ASPECTS>;
 using PortESignalAspects =
     RepeatedGroup<SignalMastAspectConfig, CSX_1998_332A_NUM_ASPECTS>;
 
@@ -86,7 +86,7 @@ using Ext0PC = RepeatedGroup<PCConfig, 16 * NUM_MCPIOS>;
 
 /// Modify this value every time the EEPROM needs to be cleared on the node
 /// after an update.
-static constexpr uint16_t CANONICAL_VERSION = 0x11A5 + NUM_MCPIOS;
+static constexpr uint16_t CANONICAL_VERSION = 0x11A6 + NUM_MCPIOS;
 
 CDI_GROUP(NucleoGroup, Name("Nucleo peripherals"), Description("These are physically located on the nucleo CPU daughterboard."));
 CDI_GROUP_ENTRY(green_led, ConsumerConfig, Name("Nucleo user LED"), Description("Green led (LD2)."));
@@ -107,10 +107,9 @@ CDI_GROUP_ENTRY(direct_consumers, DirectConsumers, Name("Tortoise/Hi-Power outpu
 CDI_GROUP_ENTRY(servo_consumers, ServoConsumers, Name("Servo Pin outputs"), Description("3-pin servo outputs."), RepName("Line"));
 CDI_GROUP_ENTRY(hidden_servo_5_8, ServoConsumers, Hidden(true));
 CDI_GROUP_ENTRY(portd_signal, PortDSignalAspects,
-    Name("Port D Signal Mast (CSX 4-4)"),
+    Name("Port D Signal Mast (CSX 3-3)"),
     Description("CSX 1998 double head signal mast on port D. Upper head: "
-                "G/Y/R/Lunar (lines 1-4), Lower head: G/Y/R/Lunar "
-                "(lines 5-8)."),
+                "G/Y/R (lines 1-3), Lower head: G/Y/R (lines 4-6)."),
     RepName("Aspect"));
 CDI_GROUP_ENTRY(porte_signal, PortESignalAspects,
     Name("Port E Signal Mast (CSX 3-3-2A)"),

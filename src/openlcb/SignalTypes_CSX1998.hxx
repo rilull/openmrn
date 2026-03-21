@@ -43,6 +43,55 @@ namespace openlcb
 {
 
 // ======================================================================
+// CSX 1998 Double Head 3-3 Color Light High Signal
+// Based on JMRI CLS-3-3-hi.
+//
+// LED layout (6 LEDs):
+//   Index 0: Upper Head Green
+//   Index 1: Upper Head Yellow
+//   Index 2: Upper Head Red
+//   Index 3: Lower Head Green
+//   Index 4: Lower Head Yellow
+//   Index 5: Lower Head Red
+//
+// 10 aspects.
+// ======================================================================
+
+/// Number of LEDs for the CSX 1998 double 3-light head mast.
+static constexpr unsigned CSX_1998_33_NUM_LEDS = 6;
+/// Number of aspects for the CSX 1998 double 3-light head mast.
+static constexpr unsigned CSX_1998_33_NUM_ASPECTS = 10;
+
+/// Aspect table for CSX 1998 double 3-light mast.
+///                                          H1:G H1:Y H1:R H2:G H2:Y H2:R
+static constexpr SignalAspect<6> CSX_1998_33_ASPECTS[] = {
+    /* Clear             */ {{  I,   O,   O,   O,   O,   I}},
+    /* Approach Limited  */ {{  O,   I,   O,   F,   O,   O}},
+    /* Limited Clear     */ {{  O,   O,   I,   F,   O,   O}},
+    /* Limited Approach  */ {{  O,   O,   I,   O,   F,   O}},
+    /* Approach Medium   */ {{  O,   I,   O,   I,   O,   O}},
+    /* Advance Approach  */ {{  O,   I,   O,   O,   I,   O}},
+    /* Medium Clear      */ {{  O,   O,   I,   I,   O,   O}},
+    /* Approach          */ {{  O,   I,   O,   O,   O,   I}},
+    /* Medium Approach   */ {{  O,   O,   I,   O,   I,   O}},
+    /* Stop              */ {{  O,   O,   I,   O,   O,   I}},
+};
+
+/// Aspect names for the CSX 1998 double 3-light mast (for CDI factory reset).
+static constexpr const char *const CSX_1998_33_ASPECT_NAMES[] = {
+    "Clear",
+    "Appr Limited",
+    "Limited Clear",
+    "Limited Appr",
+    "Approach Medium",
+    "Adv Approach",
+    "Medium Clear",
+    "Approach",
+    "Medium Approach",
+    "Stop",
+};
+
+// ======================================================================
 // CSX 1998 Double Head 4-4 (3-3 with Lunar) Color Light High Signal
 // Based on JMRI CLS-3-3-hi + Restricting via lunar on lower head.
 //

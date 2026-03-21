@@ -335,20 +335,21 @@ constexpr const MmapGpio PORTE_LINE7(output_register, 9, true);
 constexpr const MmapGpio PORTE_LINE8(output_register, 8, true);
 
 // ======================================================================
-// Port D: CSX 1998 Double Head 4-4 Color Light Signal Mast
-// Upper head: Green(D1), Yellow(D2), Red(D3), Lunar(D4)
-// Lower head: Green(D5), Yellow(D6), Red(D7), Lunar(D8)
+// Port D: CSX 1998 Double Head 3-3 Color Light Signal Mast
+// Upper head: Green(D1), Yellow(D2), Red(D3)
+// Lower head: Green(D4), Yellow(D5), Red(D6)
+// Lines D7-D8 are unused.
 // ======================================================================
 
 constexpr const Gpio *const kPortDSignalGpio[] = {
-    &PORTD_LINE1, &PORTD_LINE2, &PORTD_LINE3, &PORTD_LINE4, // upper: G Y R L
-    &PORTD_LINE5, &PORTD_LINE6, &PORTD_LINE7, &PORTD_LINE8, // lower: G Y R L
+    &PORTD_LINE1, &PORTD_LINE2, &PORTD_LINE3, // upper: G Y R
+    &PORTD_LINE4, &PORTD_LINE5, &PORTD_LINE6, // lower: G Y R
 };
 
-openlcb::DefinedSignalMast<openlcb::CSX_1998_44_NUM_LEDS,
-    openlcb::CSX_1998_44_NUM_ASPECTS>
+openlcb::DefinedSignalMast<openlcb::CSX_1998_33_NUM_LEDS,
+    openlcb::CSX_1998_33_NUM_ASPECTS>
     portd_signal(stack.node(), kPortDSignalGpio, ARRAYSIZE(kPortDSignalGpio),
-        openlcb::CSX_1998_44_ASPECTS, openlcb::CSX_1998_44_ASPECT_NAMES,
+        openlcb::CSX_1998_33_ASPECTS, openlcb::CSX_1998_33_ASPECT_NAMES,
         cfg.seg().portd_signal());
 
 // ======================================================================
