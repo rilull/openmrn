@@ -33,6 +33,12 @@
  * route group to CLOSED, allowing a single Event ID to line an entire path
  * (for example a yard ladder).
  *
+ * Output changes are staggered by a configurable delay so that only a bounded
+ * number of switch machine motors are ever moving (and drawing current) at the
+ * same time. This is important for machines such as the MP10 that draw current
+ * only while traveling; spacing out the movements keeps peak current within a
+ * node's power budget.
+ *
  * @author Rick Lull and Claude Code
  * @date 9 Jul 2026
  */
@@ -40,8 +46,10 @@
 #ifndef _OPENLCB_CONFIGUREDROUTEDCONSUMER_HXX_
 #define _OPENLCB_CONFIGUREDROUTEDCONSUMER_HXX_
 
+#include "executor/Timer.hxx"
 #include "openlcb/ConfigRepresentation.hxx"
 #include "openlcb/ConfiguredConsumer.hxx"
+#include "openlcb/Node.hxx"
 #include "utils/format_utils.hxx"
 
 namespace openlcb
@@ -70,6 +78,11 @@ static const char ROUTED_GROUP_MAP[] =
 
 /// Group value meaning the output does not participate in route logic.
 static constexpr uint8_t ROUTED_GROUP_NONE = 0;
+
+/// Minimum movement stagger delay, in units of 100 ms. Configured values below
+/// this floor are clamped up to it so the consumer can never step output
+/// changes faster than this safe rate.
+static constexpr uint16_t ROUTED_MIN_STAGGER_DELAY = 10; // 1.0 s
 
 /// CDI Configuration for one turnout output in a routed group. Each output has
 /// individual CLOSED and THROWN events for granular control, a route event for
@@ -116,6 +129,17 @@ CDI_GROUP_END();
 /// automatically. Outputs assigned the "None" group do not participate in route
 /// logic; their route event simply throws themselves.
 ///
+/// To bound the peak current from simultaneously moving motors, output changes
+/// are not applied all at once. Instead they are committed one at a time, with a
+/// configurable stagger delay between successive changes (a global throttle
+/// applied to individual events and route events alike). When a route selects a
+/// track, the selected (THROWN) output is committed first, then its siblings
+/// close one by one, spaced by the stagger delay. The delay is read from a
+/// Uint16ConfigEntry in units of 100 ms and is clamped up to a safe minimum
+/// (@ref ROUTED_MIN_STAGGER_DELAY). Set the delay to at least a machine's travel
+/// time (roughly 3 s for an MP10) if you want only one motor moving at a time;
+/// shorter values allow bounded overlap and therefore higher peak current.
+///
 /// Usage: ```
 ///
 /// constexpr const Gpio *const kTurnoutGpio[] = {
@@ -124,7 +148,7 @@ CDI_GROUP_END();
 /// };
 /// openlcb::ConfiguredRoutedConsumer turnout_consumer(stack.node(),
 ///    kTurnoutGpio, ARRAYSIZE(kTurnoutGpio),
-///    cfg.seg().turnout_consumers());
+///    cfg.seg().turnout_consumers(), cfg.seg().turnout_stagger_delay());
 /// ```
 class ConfiguredRoutedConsumer : public ConfigUpdateListener,
                                  private SimpleEventHandler
@@ -146,15 +170,22 @@ public:
     /// @param size is the length of the list of pins array.
     /// @param config is the repeated group object from the configuration space
     /// that represents the locations of the events.
+    /// @param stagger_delay is the configuration entry holding the movement
+    /// stagger delay in units of 100 ms (clamped up to @ref
+    /// ROUTED_MIN_STAGGER_DELAY).
     template <unsigned N>
     __attribute__((noinline)) ConfiguredRoutedConsumer(Node *node,
         const Gpio *const *pins, unsigned size,
-        const RepeatedGroup<config_entry_type, N> &config)
+        const RepeatedGroup<config_entry_type, N> &config,
+        const Uint16ConfigEntry &stagger_delay)
         : node_(node)
         , pins_(pins)
         , size_(N)
         , groups_(new uint8_t[N]())
+        , desiredState_(new uint8_t[N]())
+        , timer_(this, node)
         , offset_(config)
+        , delayOffset_(stagger_delay)
     {
         // Mismatched sizing of the GPIO array from the configuration array.
         HASSERT(size == N);
@@ -164,8 +195,10 @@ public:
     ~ConfiguredRoutedConsumer()
     {
         do_unregister();
+        timer_.cancel();
         ConfigUpdateService::instance()->unregister_update_listener(this);
         delete[] groups_;
+        delete[] desiredState_;
     }
 
     UpdateAction apply_configuration(int fd, bool initial_load,
@@ -182,6 +215,15 @@ public:
             // is coming from a user action.
             do_unregister();
         }
+        // Read and clamp the movement stagger delay (100 ms units).
+        uint16_t delay_units =
+            Uint16ConfigEntry(delayOffset_.offset()).read(fd);
+        if (delay_units < ROUTED_MIN_STAGGER_DELAY)
+        {
+            delay_units = ROUTED_MIN_STAGGER_DELAY;
+        }
+        delayNsec_ = MSEC_TO_NSEC((long long)delay_units * 100);
+
         RepeatedGroup<config_entry_type, UINT_MAX> grp_ref(offset_.offset());
         for (unsigned i = 0; i < size_; ++i)
         {
@@ -189,6 +231,9 @@ public:
             // Cache the group membership so the event report hot path never
             // reads the configuration file.
             groups_[i] = cfg_ref.group().read(fd);
+            // Sync the desired state to the current physical state so a
+            // reconfiguration never causes a spurious movement.
+            desiredState_[i] = pins_[i]->is_set() ? 1 : 0;
             EventId cfg_closed = cfg_ref.event_closed().read(fd);
             EventId cfg_thrown = cfg_ref.event_thrown().read(fd);
             EventId cfg_route = cfg_ref.event_route().read(fd);
@@ -202,6 +247,7 @@ public:
                 EventRegistryEntry(this, cfg_route,
                     (i << 2) | EVENT_ROUTE), 0);
         }
+        priorityIndex_ = NO_PRIORITY;
         return REINIT_NEEDED; // Causes events identify.
     }
 
@@ -267,39 +313,154 @@ public:
         const unsigned index = registry_entry.user_arg >> 2;
         const unsigned type = registry_entry.user_arg & 3;
 
+        // Update the desired state only; the staggered scheduler commits the
+        // change(s) to the GPIO pins over time.
         switch (type)
         {
             case EVENT_CLOSED:
-                pins_[index]->clr();
+                desiredState_[index] = 0;
                 break;
             case EVENT_THROWN:
-                pins_[index]->set();
+                desiredState_[index] = 1;
                 break;
             case EVENT_ROUTE:
-                // Close every other output that shares this output's group,
-                // then throw the selected output.
+                desiredState_[index] = 1;
                 if (groups_[index] != ROUTED_GROUP_NONE)
                 {
                     for (unsigned i = 0; i < size_; ++i)
                     {
                         if (i != index && groups_[i] == groups_[index])
                         {
-                            pins_[i]->clr();
+                            desiredState_[i] = 0;
                         }
                     }
                 }
-                pins_[index]->set();
+                // The selected (THROWN) output is committed before its
+                // siblings close.
+                priorityIndex_ = index;
                 break;
         }
 
+        schedule_pending();
         done->notify();
     }
 
 private:
+    /// Sentinel meaning no output has commit priority.
+    static constexpr unsigned NO_PRIORITY = UINT_MAX;
+
+    /// Timer that drives the staggered application of pending output changes.
+    /// Runs on the node's executor, i.e. the same thread as event handling, so
+    /// no additional locking is needed.
+    class StaggerTimer : public ::Timer
+    {
+    public:
+        StaggerTimer(ConfiguredRoutedConsumer *parent, Node *node)
+            : ::Timer(node->iface()->executor()->active_timers())
+            , parent_(parent)
+        {
+        }
+
+        long long timeout() OVERRIDE
+        {
+            return parent_->handle_timeout();
+        }
+
+    private:
+        ConfiguredRoutedConsumer *parent_;
+    };
+
+    /// @return true if output @p i still needs to move to reach its desired
+    /// state.
+    bool is_pending(unsigned i) const
+    {
+        return (pins_[i]->is_set() ? 1 : 0) != desiredState_[i];
+    }
+
+    /// @return the index of the next output to commit (priority output first,
+    /// then ascending index order), or NO_PRIORITY if nothing is pending.
+    unsigned next_pending_index()
+    {
+        if (priorityIndex_ != NO_PRIORITY)
+        {
+            if (is_pending(priorityIndex_))
+            {
+                return priorityIndex_;
+            }
+            // The priority output is already in its desired state; drop it.
+            priorityIndex_ = NO_PRIORITY;
+        }
+        for (unsigned i = 0; i < size_; ++i)
+        {
+            if (is_pending(i))
+            {
+                return i;
+            }
+        }
+        return NO_PRIORITY;
+    }
+
+    /// Applies the desired state of a single output to its GPIO pin.
+    void commit(unsigned i)
+    {
+        pins_[i]->write(desiredState_[i] ? Gpio::SET : Gpio::CLR);
+        if (i == priorityIndex_)
+        {
+            priorityIndex_ = NO_PRIORITY;
+        }
+        lastCommitTimeNsec_ = OSTime::get_monotonic();
+    }
+
+    /// Ensures the stagger timer is running if there is pending work. Schedules
+    /// the first commit no sooner than the stagger delay after the previous
+    /// commit, so the global minimum spacing between movements is preserved.
+    void schedule_pending()
+    {
+        if (timerRunning_)
+        {
+            // The running timer will pick up the newly desired changes on its
+            // next tick.
+            return;
+        }
+        if (next_pending_index() == NO_PRIORITY)
+        {
+            return;
+        }
+        timerRunning_ = true;
+        // Fire immediately if enough time has already elapsed, otherwise wait
+        // out the remainder of the stagger interval.
+        timer_.start_absolute(lastCommitTimeNsec_ + delayNsec_);
+    }
+
+    /// Timer callback: commits the next pending output and re-arms if more
+    /// remain. Runs on the node's executor.
+    /// @return Timer::RESTART to keep going, Timer::NONE when idle.
+    long long handle_timeout()
+    {
+        unsigned idx = next_pending_index();
+        if (idx == NO_PRIORITY)
+        {
+            timerRunning_ = false;
+            return Timer::NONE;
+        }
+        commit(idx);
+        if (next_pending_index() != NO_PRIORITY)
+        {
+            // A positive return value reschedules the timer this many
+            // nanoseconds from now, giving the next commit the full stagger
+            // spacing (see Timer::run()).
+            return delayNsec_;
+        }
+        timerRunning_ = false;
+        return Timer::NONE;
+    }
+
     /// Sends out a ConsumerIdentified message for the given registration
     /// entry. The valid/invalid state is derived from whether the pin's current
-    /// state matches the state implied by the event: CLOSED implies the pin is
-    /// clear; THROWN and ROUTE imply the pin is set.
+    /// physical state matches the state implied by the event: CLOSED implies the
+    /// pin is clear; THROWN and ROUTE imply the pin is set. Note that while a
+    /// staggered movement is pending the physical state may briefly lag the
+    /// desired state.
     void SendConsumerIdentified(const EventRegistryEntry &registry_entry,
         EventReport *event, BarrierNotifiable *done)
     {
@@ -330,8 +491,15 @@ private:
     const Gpio *const *pins_; //< array of all GPIO pins to use
     size_t size_;             //< number of GPIO pins to export
     uint8_t *groups_;         //< cached route group membership, one per output
+    uint8_t *desiredState_;   //< desired state of each output (1 == THROWN)
+    StaggerTimer timer_;      //< drives staggered application of changes
     ConfigReference offset_;  //< Offset in the configuration space for our
     // configs.
+    ConfigReference delayOffset_;    //< Offset of the stagger delay config.
+    long long delayNsec_{0};         //< stagger delay in nanoseconds
+    long long lastCommitTimeNsec_{0}; //< monotonic time of the last commit
+    unsigned priorityIndex_{NO_PRIORITY}; //< output to commit first, or none
+    bool timerRunning_{false};       //< whether the stagger timer is armed
 };
 
 } // namespace openlcb

@@ -80,6 +80,53 @@ For output `i`:
 There is a single route event per output; it always throws self and closes
 siblings. There is no separate "route to closed" event.
 
+## Staggered movement (current limiting)
+
+Switch machine motors draw current only while traveling (an MP10 pulls ~100 mA
+for roughly 3 s per move, then nothing). A route event can change many outputs
+at once, and closing a sibling makes *its* motor travel too, so an unthrottled
+route would start many motors simultaneously and spike the supply current.
+
+To bound peak current, output changes are **staggered**: they are committed one
+at a time with a configurable minimum spacing between successive movements. This
+is a **global throttle** — it applies to individual CLOSED/THROWN events and
+route events alike, so no burst of events can exceed the movement rate.
+
+- **Delay config**: a single node-global `Uint16ConfigEntry` in units of 100 ms,
+  passed to the constructor separately from the per-output repeated group. It is
+  **clamped up to a safe minimum** (`ROUTED_MIN_STAGGER_DELAY`, 1.0 s) on read,
+  so the consumer can never step faster than that floor. Default is 1.0 s.
+- **Concurrency guidance** (surfaced in the CDI description): the number of
+  motors that can be moving at once is roughly `ceil(travel_time / delay)`. Set
+  the delay to at least the machine's travel time (~3 s for an MP10) for strict
+  one-at-a-time movement; shorter values allow bounded overlap and higher peak
+  current. The 1.0 s floor guarantees a sane rate, not strict single-mover.
+- **Commit order**: for a route, the selected (THROWN) output commits first
+  (immediate operator feedback), then its siblings close in ascending index
+  order, each spaced by the delay.
+
+### Mechanism
+
+A **desired-state + deferred-commit** model rather than a FIFO queue:
+
+1. `desiredState_[N]` holds the intended state of each output.
+2. Event handlers update `desiredState_` only; they never touch GPIO directly.
+   (A route computes "throw self, close group siblings" into `desiredState_` and
+   marks the selected output as the priority commit.)
+3. A `Timer` on the node's executor commits the next output whose physical state
+   differs from its desired state — priority output first, then ascending index
+   — then re-arms for `delay` until everything matches.
+
+This is **self-coalescing and latest-wins**: a newer event that supersedes a
+pending change just overwrites `desiredState_`, so there is no stale-movement
+backlog and no unbounded queue. Spacing is preserved across sequences by
+scheduling each commit no sooner than `delay` after the previous one
+(`lastCommitTimeNsec_`). The timer runs on the same executor as event handling,
+so no locking is required. A stagger delay of 0 is never used — the floor keeps
+it at 1.0 s — so a single individual move still applies effectively immediately
+(the first commit fires as soon as the executor picks it up), while a second
+change within the window waits its turn.
+
 ## Implementation notes
 
 - Base classes: `ConfigUpdateListener` + `SimpleEventHandler`, mirroring
@@ -127,9 +174,11 @@ Defining `PORTDE_ROUTED` in that target's `config.hxx` drives all 16 Port D/E
 outputs as routed turnouts:
 
 - `config.hxx` adds `using RoutedTurnouts = RepeatedGroup<RoutedConsumerConfig,
-  16>` and a `routed_turnouts` CDI group entry.
+  16>`, a `routed_stagger_delay` (`Uint16ConfigEntry`, default 10 = 1.0 s), and a
+  `routed_turnouts` CDI group entry.
 - `main.cxx` instantiates `openlcb::ConfiguredRoutedConsumer` over the 16
-  `PORTD_LINE*`/`PORTE_LINE*` outputs.
+  `PORTD_LINE*`/`PORTE_LINE*` outputs, passing both the repeated group and the
+  stagger-delay entry.
 
 Because it consumes the same physical lines, `PORTDE_ROUTED` is mutually
 exclusive with `PORTD_EXCLUSIVE`, `PORTE_EXCLUSIVE`, and `PORTD_SNAP`; a

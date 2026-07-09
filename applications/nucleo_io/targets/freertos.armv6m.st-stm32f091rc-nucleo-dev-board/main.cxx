@@ -363,7 +363,7 @@ constexpr const Gpio *const kRoutedTurnoutGpio[] = {
 
 openlcb::ConfiguredRoutedConsumer routed_turnouts(stack.node(),
     kRoutedTurnoutGpio, ARRAYSIZE(kRoutedTurnoutGpio),
-    cfg.seg().routed_turnouts());
+    cfg.seg().routed_turnouts(), cfg.seg().routed_stagger_delay());
 #endif
 
 #ifdef PORTD_EXCLUSIVE

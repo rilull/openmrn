@@ -109,7 +109,7 @@ using Ext0PC = RepeatedGroup<PCConfig, 16 * NUM_MCPIOS>;
 
 /// Modify this value every time the EEPROM needs to be cleared on the node
 /// after an update.
-static constexpr uint16_t CANONICAL_VERSION = 0x11A7 + NUM_MCPIOS;
+static constexpr uint16_t CANONICAL_VERSION = 0x11A8 + NUM_MCPIOS;
 
 CDI_GROUP(NucleoGroup, Name("Nucleo peripherals"), Description("These are physically located on the nucleo CPU daughterboard."));
 CDI_GROUP_ENTRY(green_led, ConsumerConfig, Name("Nucleo user LED"), Description("Green led (LD2)."));
@@ -130,6 +130,13 @@ CDI_GROUP_ENTRY(direct_consumers, DirectConsumers, Name("Tortoise/Hi-Power outpu
 CDI_GROUP_ENTRY(servo_consumers, ServoConsumers, Name("Servo Pin outputs"), Description("3-pin servo outputs."), RepName("Line"));
 CDI_GROUP_ENTRY(hidden_servo_5_8, ServoConsumers, Hidden(true));
 #ifdef PORTDE_ROUTED
+CDI_GROUP_ENTRY(routed_stagger_delay, Uint16ConfigEntry, Default(10),
+    Name("Turnout movement stagger delay"),
+    Description("Minimum spacing between successive turnout movements, in units "
+                "of 100 ms (10 = 1.0 s). Values below 1.0 s are clamped up to "
+                "1.0 s. Set this to at least a machine's travel time (about 3 s "
+                "for an MP10) if you want only one motor moving at a time; "
+                "shorter values allow more overlap and higher peak current."));
 CDI_GROUP_ENTRY(routed_turnouts, RoutedTurnouts, Name("Routed turnout outputs"),
     Description("Line 1-8 is port D, Line 9-16 is port E. Each turnout has "
                 "individual CLOSED and THROWN events plus a route event that "

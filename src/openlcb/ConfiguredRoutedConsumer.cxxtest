@@ -49,6 +49,10 @@ static const uint64_t kEventBase = 0x05010101FFFF0000ULL;
 
 /// Test fixture for ConfiguredRoutedConsumer. Four outputs are configured. The
 /// group assignment is supplied per test so routing behavior can be exercised.
+///
+/// Because output changes are staggered by the (clamped) minimum stagger delay
+/// of 1 s, assertions on final state are made after twait(), which waits for all
+/// pending movement timers to settle.
 class ConfiguredRoutedConsumerTest : public AsyncNodeTest
 {
 protected:
@@ -63,6 +67,9 @@ protected:
     ///    8 bytes event_route  (EventConfigEntry, big-endian)
     /// Total: 41 bytes per entry.
     static constexpr unsigned kEntrySize = 41;
+
+    /// The stagger delay Uint16 is placed right after the repeated group.
+    static constexpr unsigned kDelayOffset = kEntrySize * kNumOutputs;
 
     ~ConfiguredRoutedConsumerTest()
     {
@@ -96,7 +103,7 @@ protected:
         fd_ = mkstemp(tempFile_);
         ASSERT_GE(fd_, 0);
 
-        uint8_t buf[kEntrySize * kNumOutputs];
+        uint8_t buf[kDelayOffset + 2];
         memset(buf, 0, sizeof(buf));
 
         for (unsigned i = 0; i < kNumOutputs; ++i)
@@ -110,6 +117,9 @@ protected:
             memcpy(entry + 25, &ev_thrown, 8);
             memcpy(entry + 33, &ev_route, 8);
         }
+        // Stagger delay: 10 units = 1.0 s (also the enforced minimum).
+        uint16_t delay = htobe16(10);
+        memcpy(buf + kDelayOffset, &delay, 2);
 
         ASSERT_EQ((ssize_t)sizeof(buf), ::write(fd_, buf, sizeof(buf)));
         ::lseek(fd_, 0, SEEK_SET);
@@ -117,19 +127,21 @@ protected:
         updateFlow_.TEST_set_fd(fd_);
 
         consumer_.reset(new ConfiguredRoutedConsumer(
-            node_, kPins, kNumOutputs, cfg_));
+            node_, kPins, kNumOutputs, cfg_, delayCfg_));
 
         wait_for_main_executor();
         wait_for_event_thread();
     }
 
-    /// Sends the event with the given 64-bit id as an event report.
+    /// Sends the event with the given 64-bit id, then waits for the staggered
+    /// movement sequence to fully settle.
     void send_event(uint64_t event)
     {
         char buf[30];
         sprintf(buf, ":X195B4001N%016" PRIX64 ";", event);
         send_packet(buf);
         wait_for_event_thread();
+        twait(); // wait for all pending movement timers to complete
     }
 
     /// GPIO storage (4 bits).
@@ -143,6 +155,7 @@ protected:
     const Gpio *const kPins[kNumOutputs]{&pin0_, &pin1_, &pin2_, &pin3_};
 
     RepeatedGroup<RoutedConsumerConfig, kNumOutputs> cfg_{0};
+    Uint16ConfigEntry delayCfg_{kDelayOffset};
 
     ConfigUpdateFlow updateFlow_{ifCan_.get()};
 
@@ -256,6 +269,41 @@ TEST_F(ConfiguredRoutedConsumerTest, UnrelatedEventIgnored)
     EXPECT_FALSE(pin3_.is_set());
 }
 
+TEST_F(ConfiguredRoutedConsumerTest, StaggeredMovementIsThrownFirstThenSpaced)
+{
+    // All four outputs in group 1. Pre-throw the three that a route on output 0
+    // will need to close.
+    const uint8_t groups[kNumOutputs] = {1, 1, 1, 1};
+    create_consumer(groups);
+
+    send_event(thrown_event(1));
+    send_event(thrown_event(2));
+    send_event(thrown_event(3));
+    EXPECT_TRUE(pin1_.is_set());
+    EXPECT_TRUE(pin2_.is_set());
+    EXPECT_TRUE(pin3_.is_set());
+
+    // Fire the route but do NOT settle: send the packet and let only the first
+    // (immediate) commit run.
+    send_packet(":X195B4001N05010101FFFF0002;"); // route_event(0)
+    wait_for_event_thread();
+    usleep(300000); // 0.3 s: well past the first commit, well short of 1 s
+
+    // The selected output (priority) is thrown first; its siblings have not yet
+    // begun to close because the stagger delay (1 s) has not elapsed.
+    EXPECT_TRUE(pin0_.is_set());
+    unsigned still_thrown = (pin1_.is_set() ? 1 : 0) +
+        (pin2_.is_set() ? 1 : 0) + (pin3_.is_set() ? 1 : 0);
+    EXPECT_GT(still_thrown, 0u); // staggering in progress, not all-at-once
+
+    // Now allow the whole sequence to finish.
+    twait();
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+    EXPECT_FALSE(pin3_.is_set());
+}
+
 TEST_F(ConfiguredRoutedConsumerTest, IdentifyConsumer)
 {
     const uint8_t groups[kNumOutputs] = {1, 1, 2, 2};
@@ -268,7 +316,7 @@ TEST_F(ConfiguredRoutedConsumerTest, IdentifyConsumer)
     send_packet_and_expect_response(":X198F4001N05010101FFFF0000;",  // closed 0
                                     ":X194C422AN05010101FFFF0000;"); // VALID
 
-    // Throw output 0.
+    // Throw output 0 and let it settle.
     send_event(thrown_event(0));
     Mock::VerifyAndClear(&canBus_);
 
