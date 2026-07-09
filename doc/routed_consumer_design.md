@@ -119,6 +119,23 @@ override" — but the name reflects the routing behavior that motivates it.
   at a time, single event per output. The routed consumer generalizes this to
   multiple groups and adds independent closed/thrown control per output.
 
+## Example wiring
+
+A worked example lives in the Nucleo F303 IO board target
+(`applications/nucleo_io/targets/freertos.armv7m.st-stm32f303re-nucleo-dev-board`).
+Defining `PORTDE_ROUTED` in that target's `config.hxx` drives all 16 Port D/E
+outputs as routed turnouts:
+
+- `config.hxx` adds `using RoutedTurnouts = RepeatedGroup<RoutedConsumerConfig,
+  16>` and a `routed_turnouts` CDI group entry.
+- `main.cxx` instantiates `openlcb::ConfiguredRoutedConsumer` over the 16
+  `PORTD_LINE*`/`PORTE_LINE*` outputs.
+
+Because it consumes the same physical lines, `PORTDE_ROUTED` is mutually
+exclusive with `PORTD_EXCLUSIVE`, `PORTE_EXCLUSIVE`, and `PORTD_SNAP`; a
+`#error` guard enforces this. The option is disabled by default, so the
+shipping configuration is unchanged.
+
 ## Out of scope (future work)
 
 - Pulsed / momentary output support.

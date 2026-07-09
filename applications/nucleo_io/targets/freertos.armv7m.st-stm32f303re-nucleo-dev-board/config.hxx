@@ -5,6 +5,7 @@
 #include "openlcb/ConfiguredConsumer.hxx"
 #include "openlcb/ConfiguredExclusiveConsumer.hxx"
 #include "openlcb/ConfiguredProducer.hxx"
+#include "openlcb/ConfiguredRoutedConsumer.hxx"
 #include "openlcb/MemoryConfig.hxx"
 #include "openlcb/MultiConfiguredPC.hxx"
 #include "openlcb/ServoConsumerConfig.hxx"
@@ -52,6 +53,24 @@ extern const SimpleNodeStaticValues SNIP_STATIC_DATA = {
 #define PORTD_EXCLUSIVE
 #define PORTE_EXCLUSIVE
 
+// Routed turnout outputs (ConfiguredRoutedConsumer). When PORTDE_ROUTED is
+// defined, the 16 Port D/E outputs are driven as individually controllable
+// turnout motors (single GPIO each, e.g. a TC4428 driving a Tortoise or an
+// MP10 in 2-wire mode). Every turnout gets a CLOSED event, a THROWN event, and
+// a route event. The route event moves that turnout THROWN and moves all other
+// turnouts in its route group to CLOSED, so a single button can line a yard
+// ladder. Because it consumes the same physical Port D/E lines, this option is
+// mutually exclusive with PORTD_EXCLUSIVE, PORTE_EXCLUSIVE, and the plain
+// Port D/E consumers -- comment those out to enable it.
+//
+//#define PORTDE_ROUTED
+
+#if defined(PORTDE_ROUTED) &&                                                   \
+    (defined(PORTD_EXCLUSIVE) || defined(PORTE_EXCLUSIVE) || defined(PORTD_SNAP))
+#error "PORTDE_ROUTED drives the same Port D/E lines; disable PORTD_EXCLUSIVE, "\
+       "PORTE_EXCLUSIVE, and PORTD_SNAP to use it."
+#endif
+
 /// Declares a repeated group of a given base group and number of repeats. The
 /// ProducerConfig and ConsumerConfig groups represent the configuration layout
 /// needed by the ConfiguredProducer and ConfiguredConsumer classes, and come
@@ -71,6 +90,10 @@ using ServoConsumers = RepeatedGroup<ServoConsumerConfig, 4>;
 
 /// Exclusive consumer groups: 4 outputs each, only one active at a time.
 using ExclusiveGroup4 = RepeatedGroup<ExclusiveConsumerConfig, 4>;
+
+/// Routed turnout group spanning all 16 Port D/E outputs. Each entry carries a
+/// route group selector plus closed/thrown/route events.
+using RoutedTurnouts = RepeatedGroup<RoutedConsumerConfig, 16>;
 
 // As the IO expansion boards have different available capacities
 // we are updating this define to track number of MCPs instead of
@@ -106,7 +129,13 @@ CDI_GROUP_ENTRY(snap_switches, PulseConsumers, Name("Consumers for snap switches
 CDI_GROUP_ENTRY(direct_consumers, DirectConsumers, Name("Tortoise/Hi-Power outputs"), RepName("Line"));
 CDI_GROUP_ENTRY(servo_consumers, ServoConsumers, Name("Servo Pin outputs"), Description("3-pin servo outputs."), RepName("Line"));
 CDI_GROUP_ENTRY(hidden_servo_5_8, ServoConsumers, Hidden(true));
-#ifdef PORTD_SNAP
+#ifdef PORTDE_ROUTED
+CDI_GROUP_ENTRY(routed_turnouts, RoutedTurnouts, Name("Routed turnout outputs"),
+    Description("Line 1-8 is port D, Line 9-16 is port E. Each turnout has "
+                "individual CLOSED and THROWN events plus a route event that "
+                "throws it and closes all other turnouts in its route group."),
+    RepName("Turnout"));
+#elif defined(PORTD_SNAP)
 CDI_GROUP_ENTRY(portde_consumers, PortDEConsumers, Name("Port E outputs"), Description("Line 1-4 is port E 5 - 8; offset due to Snap Switches"), RepName("Line"));
 #else
 CDI_GROUP_ENTRY(portde_consumers, PortDEConsumers, Name("Port D/E outputs"), Description("Line 1-8 is port D, Line 9-16 is port E"), RepName("Line"));

@@ -43,6 +43,7 @@
 #include "openlcb/SimpleStack.hxx"
 #include "openlcb/MultiConfiguredConsumer.hxx"
 #include "openlcb/ConfiguredExclusiveConsumer.hxx"
+#include "openlcb/ConfiguredRoutedConsumer.hxx"
 #include "openlcb/ConfiguredProducer.hxx"
 #include "openlcb/ServoConsumer.hxx"
 
@@ -331,7 +332,8 @@ constexpr const MmapGpio PORTE_LINE6(output_register, 10, true);
 constexpr const MmapGpio PORTE_LINE7(output_register, 9, true);
 constexpr const MmapGpio PORTE_LINE8(output_register, 8, true);
 
-#if !defined(PORTD_EXCLUSIVE) && !defined(PORTE_EXCLUSIVE)
+#if !defined(PORTD_EXCLUSIVE) && !defined(PORTE_EXCLUSIVE) && \
+    !defined(PORTDE_ROUTED)
 constexpr const Gpio *const kPortDEGpio[] = {
 #ifndef PORTD_SNAP
     &PORTD_LINE1, &PORTD_LINE2, &PORTD_LINE3, &PORTD_LINE4, //
@@ -343,6 +345,25 @@ constexpr const Gpio *const kPortDEGpio[] = {
 
 openlcb::MultiConfiguredConsumer portde_consumers(stack.node(), kPortDEGpio,
     ARRAYSIZE(kPortDEGpio), cfg.seg().portde_consumers());
+#endif
+
+#ifdef PORTDE_ROUTED
+// ======================================================================
+// Routed turnout outputs: all 16 Port D/E lines are driven as turnout
+// motors. Each has individual CLOSED/THROWN events plus a route event
+// that throws it and closes every other turnout sharing its route group
+// (configured per output via the CDI group dropdown).
+// ======================================================================
+constexpr const Gpio *const kRoutedTurnoutGpio[] = {
+    &PORTD_LINE1, &PORTD_LINE2, &PORTD_LINE3, &PORTD_LINE4, //
+    &PORTD_LINE5, &PORTD_LINE6, &PORTD_LINE7, &PORTD_LINE8, //
+    &PORTE_LINE1, &PORTE_LINE2, &PORTE_LINE3, &PORTE_LINE4, //
+    &PORTE_LINE5, &PORTE_LINE6, &PORTE_LINE7, &PORTE_LINE8  //
+};
+
+openlcb::ConfiguredRoutedConsumer routed_turnouts(stack.node(),
+    kRoutedTurnoutGpio, ARRAYSIZE(kRoutedTurnoutGpio),
+    cfg.seg().routed_turnouts());
 #endif
 
 #ifdef PORTD_EXCLUSIVE
