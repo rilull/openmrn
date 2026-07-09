@@ -1,0 +1,284 @@
+/** \copyright
+ * Copyright (c) 2026, Rick Lull
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are  permitted provided that the following conditions are met:
+ *
+ *  - Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ *
+ *  - Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
+ * \file ConfiguredRoutedConsumer.cxxtest
+ *
+ * Unit tests for ConfiguredRoutedConsumer.
+ *
+ * @author Rick Lull and Claude Code
+ * @date 9 Jul 2026
+ */
+
+#include "utils/async_if_test_helper.hxx"
+
+#include "openlcb/ConfiguredRoutedConsumer.hxx"
+#include "openlcb/ConfigUpdateFlow.hxx"
+#include "os/MmapGpio.hxx"
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+namespace openlcb
+{
+
+static const uint64_t kEventBase = 0x05010101FFFF0000ULL;
+
+/// Test fixture for ConfiguredRoutedConsumer. Four outputs are configured. The
+/// group assignment is supplied per test so routing behavior can be exercised.
+class ConfiguredRoutedConsumerTest : public AsyncNodeTest
+{
+protected:
+    /// Number of outputs under test.
+    static constexpr unsigned kNumOutputs = 4;
+
+    /// RoutedConsumerConfig layout per entry (byte packed):
+    ///   16 bytes description  (StringConfigEntry<16>)
+    ///    1 byte  group        (Uint8ConfigEntry)
+    ///    8 bytes event_closed (EventConfigEntry, big-endian)
+    ///    8 bytes event_thrown (EventConfigEntry, big-endian)
+    ///    8 bytes event_route  (EventConfigEntry, big-endian)
+    /// Total: 41 bytes per entry.
+    static constexpr unsigned kEntrySize = 41;
+
+    ~ConfiguredRoutedConsumerTest()
+    {
+        wait_for_event_thread();
+        if (fd_ >= 0)
+        {
+            ::close(fd_);
+        }
+        unlink(tempFile_);
+    }
+
+    /// Encodes the event IDs for output @p i. The closed, thrown, and route
+    /// events are laid out as base + i*16 + {0,1,2} so every event is unique.
+    static uint64_t closed_event(unsigned i)
+    {
+        return kEventBase + i * 16 + 0;
+    }
+    static uint64_t thrown_event(unsigned i)
+    {
+        return kEventBase + i * 16 + 1;
+    }
+    static uint64_t route_event(unsigned i)
+    {
+        return kEventBase + i * 16 + 2;
+    }
+
+    /// Creates a temporary config file and initializes the consumer.
+    /// @param groups array of kNumOutputs group assignments (0 == None).
+    void create_consumer(const uint8_t groups[kNumOutputs])
+    {
+        fd_ = mkstemp(tempFile_);
+        ASSERT_GE(fd_, 0);
+
+        uint8_t buf[kEntrySize * kNumOutputs];
+        memset(buf, 0, sizeof(buf));
+
+        for (unsigned i = 0; i < kNumOutputs; ++i)
+        {
+            uint8_t *entry = buf + i * kEntrySize;
+            entry[16] = groups[i]; // group selector after 16-byte description
+            uint64_t ev_closed = htobe64(closed_event(i));
+            uint64_t ev_thrown = htobe64(thrown_event(i));
+            uint64_t ev_route = htobe64(route_event(i));
+            memcpy(entry + 17, &ev_closed, 8);
+            memcpy(entry + 25, &ev_thrown, 8);
+            memcpy(entry + 33, &ev_route, 8);
+        }
+
+        ASSERT_EQ((ssize_t)sizeof(buf), ::write(fd_, buf, sizeof(buf)));
+        ::lseek(fd_, 0, SEEK_SET);
+
+        updateFlow_.TEST_set_fd(fd_);
+
+        consumer_.reset(new ConfiguredRoutedConsumer(
+            node_, kPins, kNumOutputs, cfg_));
+
+        wait_for_main_executor();
+        wait_for_event_thread();
+    }
+
+    /// Sends the event with the given 64-bit id as an event report.
+    void send_event(uint64_t event)
+    {
+        char buf[30];
+        sprintf(buf, ":X195B4001N%016" PRIX64 ";", event);
+        send_packet(buf);
+        wait_for_event_thread();
+    }
+
+    /// GPIO storage (4 bits).
+    uint32_t gpioStorage_{0};
+
+    MmapGpio pin0_{&gpioStorage_, 0, true};
+    MmapGpio pin1_{&gpioStorage_, 1, true};
+    MmapGpio pin2_{&gpioStorage_, 2, true};
+    MmapGpio pin3_{&gpioStorage_, 3, true};
+
+    const Gpio *const kPins[kNumOutputs]{&pin0_, &pin1_, &pin2_, &pin3_};
+
+    RepeatedGroup<RoutedConsumerConfig, kNumOutputs> cfg_{0};
+
+    ConfigUpdateFlow updateFlow_{ifCan_.get()};
+
+    std::unique_ptr<ConfiguredRoutedConsumer> consumer_;
+
+    int fd_{-1};
+    char tempFile_[40] = "/tmp/routed_test_XXXXXX";
+};
+
+TEST_F(ConfiguredRoutedConsumerTest, CreateDestroy)
+{
+    const uint8_t groups[kNumOutputs] = {1, 1, 2, 2};
+    create_consumer(groups);
+}
+
+TEST_F(ConfiguredRoutedConsumerTest, IndividualThrownAndClosed)
+{
+    const uint8_t groups[kNumOutputs] = {1, 1, 2, 2};
+    create_consumer(groups);
+
+    // Throw output 1 individually -- no other output changes.
+    send_event(thrown_event(1));
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_TRUE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+    EXPECT_FALSE(pin3_.is_set());
+
+    // Throw output 3 individually.
+    send_event(thrown_event(3));
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_TRUE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+    EXPECT_TRUE(pin3_.is_set());
+
+    // Close output 1 individually -- output 3 is unaffected.
+    send_event(closed_event(1));
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+    EXPECT_TRUE(pin3_.is_set());
+}
+
+TEST_F(ConfiguredRoutedConsumerTest, RouteWithinGroup)
+{
+    // Outputs 0 and 1 are group 1; outputs 2 and 3 are group 2.
+    const uint8_t groups[kNumOutputs] = {1, 1, 2, 2};
+    create_consumer(groups);
+
+    // Route event for output 0: throws 0, closes group-1 sibling 1. Group 2
+    // outputs are untouched.
+    send_event(thrown_event(1)); // pre-set sibling
+    send_event(thrown_event(2)); // pre-set an unrelated group member
+    EXPECT_TRUE(pin1_.is_set());
+    EXPECT_TRUE(pin2_.is_set());
+
+    send_event(route_event(0));
+    EXPECT_TRUE(pin0_.is_set());   // selected -> thrown
+    EXPECT_FALSE(pin1_.is_set());  // sibling -> closed
+    EXPECT_TRUE(pin2_.is_set());   // other group -> unchanged
+    EXPECT_FALSE(pin3_.is_set());
+}
+
+TEST_F(ConfiguredRoutedConsumerTest, RouteAcrossFullGroup)
+{
+    // All four outputs share group 1: a route acts like exclusive selection.
+    const uint8_t groups[kNumOutputs] = {1, 1, 1, 1};
+    create_consumer(groups);
+
+    send_event(route_event(2));
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_TRUE(pin2_.is_set());
+    EXPECT_FALSE(pin3_.is_set());
+
+    // Selecting another track lines the ladder for it.
+    send_event(route_event(0));
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+    EXPECT_FALSE(pin3_.is_set());
+}
+
+TEST_F(ConfiguredRoutedConsumerTest, RouteWithNoneGroupThrowsOnlySelf)
+{
+    // Output 0 is in group None (0); it must not disturb any other output, and
+    // a route on it simply throws itself.
+    const uint8_t groups[kNumOutputs] = {0, 1, 1, 1};
+    create_consumer(groups);
+
+    send_event(thrown_event(2));
+    EXPECT_TRUE(pin2_.is_set());
+
+    send_event(route_event(0));
+    EXPECT_TRUE(pin0_.is_set());  // throws itself
+    EXPECT_TRUE(pin2_.is_set());  // None group -> no siblings closed
+}
+
+TEST_F(ConfiguredRoutedConsumerTest, UnrelatedEventIgnored)
+{
+    const uint8_t groups[kNumOutputs] = {1, 1, 2, 2};
+    create_consumer(groups);
+
+    send_event(thrown_event(0));
+    EXPECT_TRUE(pin0_.is_set());
+
+    // An event not registered by this consumer changes nothing.
+    send_event(kEventBase + 0xFF);
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+    EXPECT_FALSE(pin2_.is_set());
+    EXPECT_FALSE(pin3_.is_set());
+}
+
+TEST_F(ConfiguredRoutedConsumerTest, IdentifyConsumer)
+{
+    const uint8_t groups[kNumOutputs] = {1, 1, 2, 2};
+    create_consumer(groups);
+
+    // Output 0 starts clear: the thrown event is INVALID and the closed event
+    // is VALID.
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0001;",  // thrown 0
+                                    ":X194C522AN05010101FFFF0001;"); // INVALID
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0000;",  // closed 0
+                                    ":X194C422AN05010101FFFF0000;"); // VALID
+
+    // Throw output 0.
+    send_event(thrown_event(0));
+    Mock::VerifyAndClear(&canBus_);
+
+    // Now the thrown and route events are VALID, the closed event INVALID.
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0001;",  // thrown 0
+                                    ":X194C422AN05010101FFFF0001;"); // VALID
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0002;",  // route 0
+                                    ":X194C422AN05010101FFFF0002;"); // VALID
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0000;",  // closed 0
+                                    ":X194C522AN05010101FFFF0000;"); // INVALID
+}
+
+} // namespace openlcb
