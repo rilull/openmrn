@@ -1,0 +1,276 @@
+#include "utils/async_if_test_helper.hxx"
+
+#include "openlcb/ConfiguredSamplingIO.hxx"
+#include "openlcb/ConfigUpdateFlow.hxx"
+#include "executor/Executor.hxx"
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+namespace openlcb
+{
+
+static const uint64_t kEventBase = 0x05010101FFFF0000ULL;
+
+/// A fake Gpio that supports dynamic direction switching and lets the test
+/// control the externally-driven line level (i.e. the pushbutton) separately
+/// from the last written output level. Models active-low hardware: while the
+/// pin is an input, a "pressed" button drives the line low; otherwise the
+/// external pull-up holds it high.
+class FakeSamplingGpio : public Gpio
+{
+public:
+    void write(Value new_state) const override
+    {
+        level_ = new_state;
+    }
+    void set() const override
+    {
+        level_ = VHIGH;
+    }
+    void clr() const override
+    {
+        level_ = VLOW;
+    }
+    Value read() const override
+    {
+        if (dir_ == Direction::DINPUT)
+        {
+            return pressed_ ? VLOW : VHIGH;
+        }
+        return level_;
+    }
+    void set_direction(Direction dir) const override
+    {
+        dir_ = dir;
+    }
+    Direction direction() const override
+    {
+        return dir_;
+    }
+
+    /// @return true if the LED is lit. Active-low: LED on when the output is
+    /// driven low.
+    bool led_on() const
+    {
+        return level_ == VLOW;
+    }
+
+    /// Last written output level (idle high == LED off for active-low).
+    mutable Value level_ {VHIGH};
+    /// Current pin direction.
+    mutable Direction dir_ {Direction::DOUTPUT};
+    /// Simulated pushbutton: true == pressed.
+    mutable bool pressed_ {false};
+};
+
+/// Test fixture for ConfiguredSamplingIO.
+class ConfiguredSamplingIOTest : public AsyncNodeTest
+{
+protected:
+    /// Bytes per SamplingPinConfig entry:
+    ///   20 description + 8 event_on + 8 event_off + 8 event_pressed
+    ///    + 1 debounce = 45.
+    static constexpr unsigned kEntrySize = 45;
+    /// Number of pins under test.
+    static constexpr unsigned kNumPins = 2;
+
+    ~ConfiguredSamplingIOTest()
+    {
+        wait_for_event_thread();
+        if (fd_ >= 0)
+        {
+            ::close(fd_);
+        }
+        unlink(tempFile_);
+    }
+
+    /// Writes a big-endian event id into the config buffer.
+    void set_event(uint8_t *buf, unsigned entry, unsigned field_offset,
+        uint64_t event)
+    {
+        uint64_t be = htobe64(event);
+        memcpy(buf + entry * kEntrySize + field_offset, &be, 8);
+    }
+
+    /// Creates the temporary config file and instantiates the object under
+    /// test. Pin i gets on/off/pressed events at kEventBase + i*3 + {0,1,2}.
+    void create_object(uint8_t debounce = 2)
+    {
+        fd_ = mkstemp(tempFile_);
+        ASSERT_GE(fd_, 0);
+
+        uint8_t buf[kEntrySize * kNumPins];
+        memset(buf, 0, sizeof(buf));
+        for (unsigned i = 0; i < kNumPins; ++i)
+        {
+            set_event(buf, i, 20, kEventBase + i * 3 + 0); // event_on
+            set_event(buf, i, 28, kEventBase + i * 3 + 1); // event_off
+            set_event(buf, i, 36, kEventBase + i * 3 + 2); // event_pressed
+            buf[i * kEntrySize + 44] = debounce;           // debounce
+        }
+        ASSERT_EQ((ssize_t)sizeof(buf), ::write(fd_, buf, sizeof(buf)));
+        ::lseek(fd_, 0, SEEK_SET);
+
+        updateFlow_.TEST_set_fd(fd_);
+
+        // A very long sampling period keeps the background sampler asleep for
+        // the duration of the test; sampling is driven manually via
+        // TEST_sample_once(). Settle time is zeroed to avoid delays.
+        obj_.reset(new ConfiguredSamplingIO(node_, &samplerService_, kPins,
+            kNumPins, cfg_, /*invert=*/true, /*sample_period_msec=*/3600000,
+            /*settle_usec=*/0));
+
+        wait_for_main_executor();
+        wait_for_event_thread();
+    }
+
+    /// Drives the publish tier synchronously and waits for it to complete.
+    void run_publish()
+    {
+        SyncNotifiable sn;
+        WriteHelper wh;
+        obj_->poll_33hz(&wh, &sn);
+        sn.wait_for_notification();
+        wait_for_event_thread();
+    }
+
+    /// Dedicated executor for the sampler tier (mirrors real usage).
+    Executor<1> samplerExecutor_ {"sampler", 0, 2048};
+    Service samplerService_ {&samplerExecutor_};
+
+    FakeSamplingGpio pin0_;
+    FakeSamplingGpio pin1_;
+    const Gpio *const kPins[kNumPins] {&pin0_, &pin1_};
+
+    RepeatedGroup<SamplingPinConfig, kNumPins> cfg_ {0};
+    ConfigUpdateFlow updateFlow_ {ifCan_.get()};
+    std::unique_ptr<ConfiguredSamplingIO> obj_;
+
+    int fd_ {-1};
+    char tempFile_[40] = "/tmp/sampling_test_XXXXXX";
+};
+
+TEST_F(ConfiguredSamplingIOTest, CreateDestroy)
+{
+    create_object();
+}
+
+TEST_F(ConfiguredSamplingIOTest, LedStartsOff)
+{
+    create_object();
+    obj_->TEST_sample_once();
+    EXPECT_FALSE(pin0_.led_on());
+    EXPECT_FALSE(pin1_.led_on());
+}
+
+TEST_F(ConfiguredSamplingIOTest, ConsumerTurnsLedOnAndOff)
+{
+    create_object();
+
+    // event_on for pin 0.
+    send_packet(":X195B4001N05010101FFFF0000;");
+    wait_for_event_thread();
+    obj_->TEST_sample_once();
+    EXPECT_TRUE(pin0_.led_on());
+    EXPECT_FALSE(pin1_.led_on());
+
+    // event_off for pin 0.
+    send_packet(":X195B4001N05010101FFFF0001;");
+    wait_for_event_thread();
+    obj_->TEST_sample_once();
+    EXPECT_FALSE(pin0_.led_on());
+}
+
+TEST_F(ConfiguredSamplingIOTest, ConsumerPinsAreIndependent)
+{
+    create_object();
+
+    // event_on for pin 1 only.
+    send_packet(":X195B4001N05010101FFFF0003;");
+    wait_for_event_thread();
+    obj_->TEST_sample_once();
+    EXPECT_FALSE(pin0_.led_on());
+    EXPECT_TRUE(pin1_.led_on());
+}
+
+TEST_F(ConfiguredSamplingIOTest, ButtonPressProducesEvent)
+{
+    create_object(/*debounce=*/2);
+
+    // Press the button on pin 0 and run enough samples to pass debounce.
+    pin0_.pressed_ = true;
+    obj_->TEST_sample_once();
+    obj_->TEST_sample_once();
+
+    // The pressed event for pin 0 is kEventBase + 2.
+    expect_packet(":X195B422AN05010101FFFF0002;");
+    run_publish();
+}
+
+TEST_F(ConfiguredSamplingIOTest, ButtonReleaseProducesNoEvent)
+{
+    create_object(/*debounce=*/2);
+
+    // Press then verify the press event fired.
+    pin0_.pressed_ = true;
+    obj_->TEST_sample_once();
+    obj_->TEST_sample_once();
+    expect_packet(":X195B422AN05010101FFFF0002;");
+    run_publish();
+    Mock::VerifyAndClear(&canBus_);
+
+    // Release the button; run samples. No event should be produced (momentary
+    // button has no release event).
+    pin0_.pressed_ = false;
+    obj_->TEST_sample_once();
+    obj_->TEST_sample_once();
+    // No expect_packet set -> any produced packet fails the test.
+    run_publish();
+}
+
+TEST_F(ConfiguredSamplingIOTest, DebounceRequiresStableSamples)
+{
+    create_object(/*debounce=*/3);
+
+    // A single noisy sample must not be enough to register a press.
+    pin0_.pressed_ = true;
+    obj_->TEST_sample_once(); // 1 of 3
+    pin0_.pressed_ = false;   // bounces back before reaching the count
+    obj_->TEST_sample_once();
+    // No event should have latched yet.
+    run_publish();
+    Mock::VerifyAndClear(&canBus_);
+
+    // Now hold it stably for the full debounce count.
+    pin0_.pressed_ = true;
+    obj_->TEST_sample_once();
+    obj_->TEST_sample_once();
+    obj_->TEST_sample_once();
+    expect_packet(":X195B422AN05010101FFFF0002;");
+    run_publish();
+}
+
+TEST_F(ConfiguredSamplingIOTest, PressDoesNotDisturbLed)
+{
+    create_object(/*debounce=*/2);
+
+    // Turn the LED on for pin 0.
+    send_packet(":X195B4001N05010101FFFF0000;");
+    wait_for_event_thread();
+    obj_->TEST_sample_once();
+    EXPECT_TRUE(pin0_.led_on());
+
+    // Press the button; after sampling, the LED output must be restored.
+    pin0_.pressed_ = true;
+    obj_->TEST_sample_once();
+    obj_->TEST_sample_once();
+    EXPECT_TRUE(pin0_.led_on());
+    EXPECT_EQ(Gpio::Direction::DOUTPUT, pin0_.direction());
+
+    expect_packet(":X195B422AN05010101FFFF0002;");
+    run_publish();
+}
+
+} // namespace openlcb
