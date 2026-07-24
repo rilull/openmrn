@@ -44,15 +44,16 @@
 #ifndef _FREERTOS_DRIVERS_COMMON_GPIOSAMPLINGWRAPPER_HXX_
 #define _FREERTOS_DRIVERS_COMMON_GPIOSAMPLINGWRAPPER_HXX_
 
-#include "os/Gpio.hxx"
+#include "freertos_drivers/common/GpioWrapper.hxx"
 
 /// Creates an implementation of an os-independent @ref Gpio object from a
 /// static hardware GPIO structure that supports dynamic input/output
-/// switching. Unlike @ref GpioWrapper, this adaptor permits changing the pin
-/// direction: set_direction() maps to the pin's set_output() / set_input()
-/// static methods, which reconfigure the hardware while preserving the
-/// original output-drive (e.g. open-drain) and pull configuration
-/// respectively.
+/// switching. This is identical to @ref GpioWrapper except for set_direction():
+/// @ref GpioWrapper forbids direction changes (it HASSERTs), whereas this
+/// adaptor maps set_direction() to the pin's set_output() / set_input() static
+/// methods, which reconfigure the hardware while preserving the original
+/// output-drive (e.g. open-drain) and pull configuration respectively. All
+/// other behavior (read/write/direction) is inherited unchanged.
 ///
 /// @tparam PIN a static pin structure exposing set(bool), get(),
 /// set_output(), set_input() and is_output(). @ref GpioHwPin (declared through
@@ -66,7 +67,7 @@
 ///     GpioSamplingWrapper<IO1_Pin>::instance(),
 /// };
 /// @endcode
-template <class PIN> class GpioSamplingWrapper : public Gpio
+template <class PIN> class GpioSamplingWrapper : public GpioWrapper<PIN>
 {
 public:
     /// This constructor is constexpr which ensures that the object can be
@@ -75,29 +76,9 @@ public:
     {
     }
 
-    void write(Value new_state) const override
+    void set_direction(Gpio::Direction dir) const override
     {
-        PIN::set(new_state);
-    }
-
-    void set() const override
-    {
-        PIN::set(true);
-    }
-
-    void clr() const override
-    {
-        PIN::set(false);
-    }
-
-    Value read() const override
-    {
-        return PIN::get() ? VHIGH : VLOW;
-    }
-
-    void set_direction(Direction dir) const override
-    {
-        if (dir == Direction::DOUTPUT)
+        if (dir == Gpio::Direction::DOUTPUT)
         {
             // Re-enables the output driver. On STM32 the ODR retains its last
             // value across the mode switch, so any level written via write()
@@ -112,18 +93,14 @@ public:
         }
     }
 
-    Direction direction() const override
-    {
-        return PIN::is_output() ? Direction::DOUTPUT : Direction::DINPUT;
-    }
-
     /// @return the static Gpio object instance controlling this pin.
     static constexpr const Gpio *instance()
     {
         return &instance_;
     }
 
-    /// Singleton instance for this pin.
+    /// Singleton instance for this pin. Distinct from GpioWrapper's so that the
+    /// vtable resolves to this class's set_direction().
     static const GpioSamplingWrapper instance_;
 };
 

@@ -54,6 +54,8 @@
 #ifndef _OPENLCB_CONFIGUREDSAMPLINGIO_HXX_
 #define _OPENLCB_CONFIGUREDSAMPLINGIO_HXX_
 
+#include <memory>
+
 #include "executor/Executable.hxx"
 #include "executor/Notifiable.hxx"
 #include "executor/StateFlow.hxx"
@@ -154,19 +156,13 @@ public:
         // Mismatched sizing of the GPIO array from the configuration array.
         HASSERT(size == N);
         ConfigUpdateService::instance()->register_update_listener(this);
-        producedEvents_ = new EventId[size_];
-        ledActive_ = new bool[size_];
-        pendingPress_ = new bool[size_];
-        std::allocator<debouncer_type> alloc;
-        debouncers_ = alloc.allocate(size_);
+        // Single allocation for all per-pin state (see @ref PerPin). Each
+        // element is default-constructed with its in-class initializers.
+        state_.reset(new PerPin[size_]);
         for (unsigned i = 0; i < size_; ++i)
         {
-            producedEvents_[i] = 0;
-            ledActive_[i] = false;
-            pendingPress_[i] = false;
-            alloc_traits::construct(alloc, debouncers_ + i, 2);
             // Drives the output to the safe (off) state to start with.
-            drive_output(i);
+            write_output(i);
         }
         // Starts the periodic sampler only after all per-pin state is
         // constructed above, so the sampler thread never observes it
@@ -179,15 +175,6 @@ public:
         sampler_.shutdown();
         do_unregister();
         ConfigUpdateService::instance()->unregister_update_listener(this);
-        delete[] producedEvents_;
-        delete[] ledActive_;
-        delete[] pendingPress_;
-        std::allocator<debouncer_type> alloc;
-        for (unsigned i = 0; i < size_; ++i)
-        {
-            alloc_traits::destroy(alloc, debouncers_ + i);
-        }
-        alloc.deallocate(debouncers_, size_);
     }
 
     /// @return the instance to give to the RefreshLoop object.
@@ -216,18 +203,18 @@ public:
             bool pressed = false;
             {
                 AtomicHolder h(this);
-                if (pendingPress_[i])
+                if (state_[i].pendingPress)
                 {
-                    pendingPress_[i] = false;
+                    state_[i].pendingPress = false;
                     pressed = true;
                 }
             }
-            if (pressed && producedEvents_[i])
+            if (pressed && state_[i].producedEvent)
             {
                 ++nextPinToPoll_; // avoid infinite loop.
                 pollingHelper_->WriteAsync(node_, Defs::MTI_EVENT_REPORT,
                     WriteHelper::global(),
-                    eventid_to_buffer(producedEvents_[i]), this);
+                    eventid_to_buffer(state_[i].producedEvent), this);
                 return;
             }
         }
@@ -268,11 +255,11 @@ public:
                 0);
             {
                 AtomicHolder h(this);
-                producedEvents_[i] = cfg_event_pressed;
-                debouncers_[i].reset_options(param ? param : 1);
+                state_[i].producedEvent = cfg_event_pressed;
+                state_[i].debouncer.reset_options(param ? param : 1);
                 // The button is not pressed at rest; initialize accordingly.
-                debouncers_[i].initialize(false);
-                pendingPress_[i] = false;
+                state_[i].debouncer.initialize(false);
+                state_[i].pendingPress = false;
             }
         }
         return REINIT_NEEDED; // Causes events identify.
@@ -369,7 +356,7 @@ public:
         // the sampler on its next cycle, so the LED updates within one sampling
         // period. All pin I/O is kept on the sampler thread on purpose.
         AtomicHolder h(this);
-        ledActive_[pin] = (slot == SLOT_ON);
+        state_[pin].ledActive = (slot == SLOT_ON);
     }
 
     /// Test-only hook: synchronously runs a single sampling cycle on the
@@ -381,7 +368,19 @@ public:
     }
 
 private:
-    using alloc_traits = std::allocator_traits<std::allocator<debouncer_type>>;
+    /// All mutable state for one pin, in a single allocation (see @ref state_).
+    struct PerPin
+    {
+        /// Event produced on button press. 0 when unconfigured.
+        EventId producedEvent {0};
+        /// Debouncer for the sampled button input. The initial count is a
+        /// placeholder; apply_configuration() sets the configured value.
+        debouncer_type debouncer {2};
+        /// Desired logical output (LED) state.
+        bool ledActive {false};
+        /// Latched debounced press edge awaiting publication.
+        bool pendingPress {false};
+    };
 
     /// user_arg slot values, packed as pin * 4 + slot.
     enum Slot
@@ -403,21 +402,39 @@ private:
         return e.user_arg & 3;
     }
 
-    /// @return the debounced/current logical output (LED) state for a pin.
+    /// @return the current logical output (LED) state for a pin.
     bool get_led(unsigned pin)
     {
         AtomicHolder h(this);
-        return ledActive_[pin];
+        return state_[pin].ledActive;
     }
 
-    /// Writes the current logical output state to the given pin's output
-    /// driver, honoring the active-low/active-high polarity.
-    /// @param pin index of the pin to drive.
-    void drive_output(unsigned pin)
+    /// Translates a logical output-active state to the electrical pin level,
+    /// honoring the active-low/active-high polarity. This is the single place
+    /// the output polarity rule lives.
+    /// @param active logical "output on" state.
+    /// @return the level to write to the pin.
+    bool output_level(bool active) const
     {
-        bool active = get_led(pin);
         // active-low (invert_): asserted output => drive pin low.
-        pins_[pin]->write(invert_ ? !active : active);
+        return invert_ ? !active : active;
+    }
+
+    /// Translates a raw sampled pin level to a logical "pressed" state.
+    /// @param level the value read from the pin.
+    /// @return true if the button is pressed.
+    bool is_pressed(Gpio::Value level) const
+    {
+        bool high = (level == Gpio::VHIGH);
+        // active-low: a pressed button pulls the line low.
+        return invert_ ? !high : high;
+    }
+
+    /// Drives the given pin's output to its current logical state.
+    /// @param pin index of the pin to drive.
+    void write_output(unsigned pin)
+    {
+        pins_[pin]->write(output_level(get_led(pin)));
     }
 
     /// The periodic sampler. Runs on the dedicated executor and, every period,
@@ -447,7 +464,10 @@ private:
 
         /// Synchronously stops the sampling loop. Safe to call from any thread;
         /// blocks until the flow has terminated and its timer is no longer
-        /// active, so that the object can be safely destroyed afterwards.
+        /// active, so that the object can be safely destroyed afterwards. This
+        /// is the same set_terminated()+ensure_triggered() stop idiom as @ref
+        /// RefreshLoop::stop(), extended to block the caller until the flow is
+        /// actually done rather than leaving that wait to the caller.
         void shutdown()
         {
             SyncNotifiable sn;
@@ -516,32 +536,35 @@ private:
     /// span the blocking settle delay.
     void sample_all()
     {
+        // Switch every pin to input first, then pay the RC settle delay once
+        // for the whole bank (the settle time is a property of the line, not of
+        // pin count). All pins are briefly high-impedance together.
+        for (unsigned i = 0; i < size_; ++i)
+        {
+            pins_[i]->set_direction(Gpio::Direction::DINPUT);
+        }
+        usleep(settleUsec_);
+        // Read each pin, restore its output, switch it back, and debounce.
         for (unsigned i = 0; i < size_; ++i)
         {
             const Gpio *pin = pins_[i];
-            // Snapshot the desired output state under the lock.
+            bool pressed = is_pressed(pin->read());
+            // Snapshot the desired output state under the lock, then restore the
+            // output level (writing the ODR while still an input avoids a
+            // glitch) and re-enable the output driver.
             bool active;
             {
                 AtomicHolder h(this);
-                active = ledActive_[i];
+                active = state_[i].ledActive;
             }
-            // Switch to input and let the line settle. No lock is held across
-            // the blocking delay.
-            pin->set_direction(Gpio::Direction::DINPUT);
-            usleep(settleUsec_);
-            bool raw_high = (pin->read() == Gpio::VHIGH);
-            // Restore the output level (writing the ODR while still an input
-            // avoids a glitch), then re-enable the output driver.
-            pin->write(invert_ ? !active : active);
+            pin->write(output_level(active));
             pin->set_direction(Gpio::Direction::DOUTPUT);
-            // active-low: a pressed button pulls the line low.
-            bool pressed = invert_ ? !raw_high : raw_high;
             AtomicHolder h(this);
-            if (debouncers_[i].update_state(pressed) &&
-                debouncers_[i].current_state())
+            if (state_[i].debouncer.update_state(pressed) &&
+                state_[i].debouncer.current_state())
             {
                 // Rising edge of the debounced press; latch it for publishing.
-                pendingPress_[i] = true;
+                state_[i].pendingPress = true;
             }
         }
     }
@@ -598,14 +621,9 @@ private:
     bool invert_;
     /// Settle time in microseconds after switching to input before reading.
     unsigned settleUsec_;
-    /// Event IDs to produce on button press, one per pin. Owned here.
-    EventId *producedEvents_;
-    /// Desired logical output (LED) state per pin. Guarded by *this Atomic.
-    bool *ledActive_;
-    /// Latched debounced press edges awaiting publication. Guarded by *this.
-    bool *pendingPress_;
-    /// One debouncer per pin. Guarded by *this Atomic. Owned here.
-    debouncer_type *debouncers_;
+    /// Per-pin state, one owned allocation of size_ elements. The mutable
+    /// fields are guarded by *this Atomic.
+    std::unique_ptr<PerPin[]> state_;
     /// The periodic sampler. Declared last so it is constructed after the
     /// state it references.
     Sampler sampler_;

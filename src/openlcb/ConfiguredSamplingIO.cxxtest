@@ -126,6 +126,15 @@ protected:
         wait_for_event_thread();
     }
 
+    /// Runs n sampling cycles synchronously (e.g. enough to pass debounce).
+    void sample_n(unsigned n)
+    {
+        while (n--)
+        {
+            obj_->TEST_sample_once();
+        }
+    }
+
     /// Drives the publish tier synchronously and waits for it to complete.
     void run_publish()
     {
@@ -201,8 +210,7 @@ TEST_F(ConfiguredSamplingIOTest, ButtonPressProducesEvent)
 
     // Press the button on pin 0 and run enough samples to pass debounce.
     pin0_.pressed_ = true;
-    obj_->TEST_sample_once();
-    obj_->TEST_sample_once();
+    sample_n(2);
 
     // The pressed event for pin 0 is kEventBase + 2.
     expect_packet(":X195B422AN05010101FFFF0002;");
@@ -215,8 +223,7 @@ TEST_F(ConfiguredSamplingIOTest, ButtonReleaseProducesNoEvent)
 
     // Press then verify the press event fired.
     pin0_.pressed_ = true;
-    obj_->TEST_sample_once();
-    obj_->TEST_sample_once();
+    sample_n(2);
     expect_packet(":X195B422AN05010101FFFF0002;");
     run_publish();
     Mock::VerifyAndClear(&canBus_);
@@ -224,8 +231,7 @@ TEST_F(ConfiguredSamplingIOTest, ButtonReleaseProducesNoEvent)
     // Release the button; run samples. No event should be produced (momentary
     // button has no release event).
     pin0_.pressed_ = false;
-    obj_->TEST_sample_once();
-    obj_->TEST_sample_once();
+    sample_n(2);
     // No expect_packet set -> any produced packet fails the test.
     run_publish();
 }
@@ -245,9 +251,7 @@ TEST_F(ConfiguredSamplingIOTest, DebounceRequiresStableSamples)
 
     // Now hold it stably for the full debounce count.
     pin0_.pressed_ = true;
-    obj_->TEST_sample_once();
-    obj_->TEST_sample_once();
-    obj_->TEST_sample_once();
+    sample_n(3);
     expect_packet(":X195B422AN05010101FFFF0002;");
     run_publish();
 }
@@ -264,8 +268,7 @@ TEST_F(ConfiguredSamplingIOTest, PressDoesNotDisturbLed)
 
     // Press the button; after sampling, the LED output must be restored.
     pin0_.pressed_ = true;
-    obj_->TEST_sample_once();
-    obj_->TEST_sample_once();
+    sample_n(2);
     EXPECT_TRUE(pin0_.led_on());
     EXPECT_EQ(Gpio::Direction::DOUTPUT, pin0_.direction());
 
