@@ -39,8 +39,10 @@
 #include "os/MmapGpio.hxx"
 
 #include <fcntl.h>
+#include <initializer_list>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
 
 namespace openlcb
 {
@@ -70,6 +72,25 @@ protected:
 
     /// The stagger delay Uint16 is placed right after the repeated group.
     static constexpr unsigned kDelayOffset = kEntrySize * kNumOutputs;
+
+    /// Number of routes in the test route table.
+    static constexpr unsigned kNumRoutes = 2;
+
+    /// RouteConfig layout per entry (byte packed):
+    ///   16 bytes description  (StringConfigEntry<16>)
+    ///    8 bytes event         (EventConfigEntry, big-endian)
+    ///    MAX_ROUTE_ACTIONS * 2 bytes actions (turnout id + state each)
+    static constexpr unsigned kRouteSize = 16 + 8 + MAX_ROUTE_ACTIONS * 2;
+
+    /// The route table follows the stagger delay Uint16.
+    static constexpr unsigned kRouteTableOffset = kDelayOffset + 2;
+
+    /// Event id base for route events (kept clear of the per-output events).
+    static constexpr uint64_t kRouteBase = kEventBase + 0x100;
+    static uint64_t route_table_event(unsigned r)
+    {
+        return kRouteBase + r;
+    }
 
     ~ConfiguredRoutedConsumerTest()
     {
@@ -103,7 +124,7 @@ protected:
         fd_ = mkstemp(tempFile_);
         ASSERT_GE(fd_, 0);
 
-        uint8_t buf[kDelayOffset + 2];
+        uint8_t buf[kRouteTableOffset + kNumRoutes * kRouteSize];
         memset(buf, 0, sizeof(buf));
 
         for (unsigned i = 0; i < kNumOutputs; ++i)
@@ -121,16 +142,47 @@ protected:
         uint16_t delay = htobe16(10);
         memcpy(buf + kDelayOffset, &delay, 2);
 
+        // Route table: locate write positions with the CDI accessors so the
+        // test does not depend on hand-computed inner offsets.
+        for (unsigned r = 0; r < kNumRoutes; ++r)
+        {
+            const RouteConfig route(routeCfg_.entry(r));
+            uint64_t ev = htobe64(routeEvent_[r]);
+            memcpy(buf + route.event().offset(), &ev, 8);
+            for (unsigned k = 0; k < MAX_ROUTE_ACTIONS; ++k)
+            {
+                const RouteActionConfig action(route.actions().entry(k));
+                buf[action.turnout().offset()] = routeTurnout_[r][k];
+                buf[action.state().offset()] = routeState_[r][k];
+            }
+        }
+
         ASSERT_EQ((ssize_t)sizeof(buf), ::write(fd_, buf, sizeof(buf)));
         ::lseek(fd_, 0, SEEK_SET);
 
         updateFlow_.TEST_set_fd(fd_);
 
         consumer_.reset(new ConfiguredRoutedConsumer(
-            node_, kPins, kNumOutputs, cfg_, delayCfg_));
+            node_, kPins, kNumOutputs, cfg_, routeCfg_, delayCfg_));
 
         wait_for_main_executor();
         wait_for_event_thread();
+    }
+
+    /// Defines route @p r: its trigger event plus up to @p n (turnout, state)
+    /// actions. Must be called before create_consumer(). Turnout ids are
+    /// 1-based; state is ROUTE_STATE_CLOSED/THROWN.
+    void set_route(unsigned r, uint64_t event,
+        std::initializer_list<std::pair<uint8_t, uint8_t>> actions)
+    {
+        routeEvent_[r] = event;
+        unsigned k = 0;
+        for (const auto &a : actions)
+        {
+            routeTurnout_[r][k] = a.first;
+            routeState_[r][k] = a.second;
+            ++k;
+        }
     }
 
     /// Sends the event with the given 64-bit id, then waits for the staggered
@@ -156,6 +208,12 @@ protected:
 
     RepeatedGroup<RoutedConsumerConfig, kNumOutputs> cfg_{0};
     Uint16ConfigEntry delayCfg_{kDelayOffset};
+    RepeatedGroup<RouteConfig, kNumRoutes> routeCfg_{kRouteTableOffset};
+
+    /// Route specification staged by set_route() before create_consumer().
+    uint64_t routeEvent_[kNumRoutes]{};
+    uint8_t routeTurnout_[kNumRoutes][MAX_ROUTE_ACTIONS]{};
+    uint8_t routeState_[kNumRoutes][MAX_ROUTE_ACTIONS]{};
 
     ConfigUpdateFlow updateFlow_{ifCan_.get()};
 
@@ -327,6 +385,72 @@ TEST_F(ConfiguredRoutedConsumerTest, IdentifyConsumer)
                                     ":X194C422AN05010101FFFF0002;"); // VALID
     send_packet_and_expect_response(":X198F4001N05010101FFFF0000;",  // closed 0
                                     ":X194C522AN05010101FFFF0000;"); // INVALID
+}
+
+TEST_F(ConfiguredRoutedConsumerTest, RouteTableCascadeLeavesDontCareUntouched)
+{
+    // Groups all None: only the route table is exercised here.
+    const uint8_t groups[kNumOutputs] = {0, 0, 0, 0};
+    // Route 0 lines a path: turnout 1 (pin 0) THROWN, turnout 3 (pin 2) CLOSED.
+    // Turnouts 2 and 4 are off the path and must be left untouched.
+    set_route(0, route_table_event(0),
+        {{1, ROUTE_STATE_THROWN}, {3, ROUTE_STATE_CLOSED}});
+    create_consumer(groups);
+
+    // Pre-throw turnouts 2, 3, 4 so the route's effect (and non-effect) is
+    // observable.
+    send_event(thrown_event(1)); // turnout 2 / pin 1 (don't-care)
+    send_event(thrown_event(2)); // turnout 3 / pin 2 (route will close)
+    send_event(thrown_event(3)); // turnout 4 / pin 3 (don't-care)
+    EXPECT_TRUE(pin1_.is_set());
+    EXPECT_TRUE(pin2_.is_set());
+    EXPECT_TRUE(pin3_.is_set());
+
+    send_event(route_table_event(0));
+    EXPECT_TRUE(pin0_.is_set());   // turnout 1 -> THROWN
+    EXPECT_TRUE(pin1_.is_set());   // turnout 2 -> unchanged (don't-care)
+    EXPECT_FALSE(pin2_.is_set());  // turnout 3 -> CLOSED
+    EXPECT_TRUE(pin3_.is_set());   // turnout 4 -> unchanged (don't-care)
+}
+
+TEST_F(ConfiguredRoutedConsumerTest, RouteTableRelines)
+{
+    const uint8_t groups[kNumOutputs] = {0, 0, 0, 0};
+    set_route(0, route_table_event(0),
+        {{1, ROUTE_STATE_THROWN}, {2, ROUTE_STATE_CLOSED}});
+    set_route(1, route_table_event(1),
+        {{1, ROUTE_STATE_CLOSED}, {2, ROUTE_STATE_THROWN}});
+    create_consumer(groups);
+
+    send_event(route_table_event(0));
+    EXPECT_TRUE(pin0_.is_set());
+    EXPECT_FALSE(pin1_.is_set());
+
+    // Selecting the other route re-lines the two turnouts.
+    send_event(route_table_event(1));
+    EXPECT_FALSE(pin0_.is_set());
+    EXPECT_TRUE(pin1_.is_set());
+}
+
+TEST_F(ConfiguredRoutedConsumerTest, RouteTableIdentify)
+{
+    const uint8_t groups[kNumOutputs] = {0, 0, 0, 0};
+    set_route(0, route_table_event(0),
+        {{1, ROUTE_STATE_THROWN}, {2, ROUTE_STATE_CLOSED}});
+    create_consumer(groups);
+
+    // Initially all outputs are clear, so turnout 1 is not yet THROWN: the
+    // route is INVALID.
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0100;",  // route 0
+                                    ":X194C522AN05010101FFFF0100;"); // INVALID
+
+    // Apply the route and let it settle.
+    send_event(route_table_event(0));
+    Mock::VerifyAndClear(&canBus_);
+
+    // Now every listed turnout matches its target state: the route is VALID.
+    send_packet_and_expect_response(":X198F4001N05010101FFFF0100;",  // route 0
+                                    ":X194C422AN05010101FFFF0100;"); // VALID
 }
 
 } // namespace openlcb

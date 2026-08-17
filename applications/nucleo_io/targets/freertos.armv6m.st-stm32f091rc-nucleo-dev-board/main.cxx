@@ -96,7 +96,13 @@ extern const char *const openlcb::CONFIG_FILENAME = "/dev/eeprom";
 // of the flash. Recommended to have at least 10% spare.
 extern const size_t openlcb::CONFIG_FILE_SIZE =
     cfg.seg().size() + cfg.seg().offset();
+#ifdef PORTDE_ROUTED
+// The opt-in routed turnout demo adds a route table; allow a slightly larger
+// budget (still >=10% spare on the 8192-byte EEPROM) only when it is enabled.
+static_assert(openlcb::CONFIG_FILE_SIZE <= 7300, "Need to adjust eeprom size");
+#else
 static_assert(openlcb::CONFIG_FILE_SIZE <= 7000, "Need to adjust eeprom size");
+#endif
 
 // The SNIP user-changeable information in also stored in the above eeprom
 // device. In general this could come from different eeprom segments, but it is
@@ -363,7 +369,8 @@ constexpr const Gpio *const kRoutedTurnoutGpio[] = {
 
 openlcb::ConfiguredRoutedConsumer routed_turnouts(stack.node(),
     kRoutedTurnoutGpio, ARRAYSIZE(kRoutedTurnoutGpio),
-    cfg.seg().routed_turnouts(), cfg.seg().routed_stagger_delay());
+    cfg.seg().routed_turnouts(), cfg.seg().routed_routes(),
+    cfg.seg().routed_stagger_delay());
 #endif
 
 #ifdef PORTD_EXCLUSIVE

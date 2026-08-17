@@ -113,6 +113,84 @@ CDI_GROUP_ENTRY(event_route, EventConfigEntry, //
                 "move all other turnouts in its route group to CLOSED."));
 CDI_GROUP_END();
 
+/// Dropdown map for a route action's target state.
+static const char ROUTE_STATE_MAP[] =
+    "<relation><property>0</property><value>Closed</value></relation>"
+    "<relation><property>1</property><value>Thrown</value></relation>";
+
+/// Dropdown map for a route action's target turnout. Value 0 means the action
+/// slot is unused; values 1..16 select the turnout (1-based). Turnouts not
+/// listed by any of a route's actions are left unchanged (don't-care).
+static const char ROUTE_TURNOUT_MAP[] =
+    "<relation><property>0</property><value>None</value></relation>"
+    "<relation><property>1</property><value>Turnout 1</value></relation>"
+    "<relation><property>2</property><value>Turnout 2</value></relation>"
+    "<relation><property>3</property><value>Turnout 3</value></relation>"
+    "<relation><property>4</property><value>Turnout 4</value></relation>"
+    "<relation><property>5</property><value>Turnout 5</value></relation>"
+    "<relation><property>6</property><value>Turnout 6</value></relation>"
+    "<relation><property>7</property><value>Turnout 7</value></relation>"
+    "<relation><property>8</property><value>Turnout 8</value></relation>"
+    "<relation><property>9</property><value>Turnout 9</value></relation>"
+    "<relation><property>10</property><value>Turnout 10</value></relation>"
+    "<relation><property>11</property><value>Turnout 11</value></relation>"
+    "<relation><property>12</property><value>Turnout 12</value></relation>"
+    "<relation><property>13</property><value>Turnout 13</value></relation>"
+    "<relation><property>14</property><value>Turnout 14</value></relation>"
+    "<relation><property>15</property><value>Turnout 15</value></relation>"
+    "<relation><property>16</property><value>Turnout 16</value></relation>";
+
+/// Turnout value meaning a route action slot is unused.
+static constexpr uint8_t ROUTE_TURNOUT_NONE = 0;
+
+/// Route action target state values.
+static constexpr uint8_t ROUTE_STATE_CLOSED = 0;
+static constexpr uint8_t ROUTE_STATE_THROWN = 1;
+
+/// Maximum number of turnout actions a single route may specify. A route that
+/// must line a deep cascade may need to set many turnouts; raise this if your
+/// routes exceed it. Every route in the table reserves this many action slots
+/// in the configuration space, so keep it only as large as needed.
+static constexpr unsigned MAX_ROUTE_ACTIONS = 8;
+
+/// CDI Configuration for a single turnout action within a route. A route is a
+/// sparse list of these; slots with turnout == None are ignored.
+CDI_GROUP(RouteActionConfig);
+/// Selects which turnout this action controls (1-based), or None for an unused
+/// slot.
+CDI_GROUP_ENTRY(turnout, Uint8ConfigEntry, Default(ROUTE_TURNOUT_NONE),
+    MapValues(ROUTE_TURNOUT_MAP), Name("Turnout"),
+    Description("Turnout to move when this route is selected. Choose None to "
+                "leave this action slot unused."));
+/// Selects the state to move the turnout to.
+CDI_GROUP_ENTRY(state, Uint8ConfigEntry, Default(ROUTE_STATE_CLOSED),
+    MapValues(ROUTE_STATE_MAP), Name("State"),
+    Description("Position to move the selected turnout to."));
+CDI_GROUP_END();
+
+/// Repeated group of route actions making up one route.
+using RouteActionList = RepeatedGroup<RouteActionConfig, MAX_ROUTE_ACTIONS>;
+
+/// CDI Configuration for one route: an event plus a sparse list of turnout
+/// actions. Receiving the event moves each listed turnout to its specified
+/// state and leaves all other turnouts unchanged. This expresses cascade yard
+/// ladders and any other arbitrary route where turnouts off the chosen path do
+/// not matter.
+CDI_GROUP(RouteConfig);
+/// Allows the user to assign a name for this route.
+CDI_GROUP_ENTRY(description, StringConfigEntry<16>, //
+    Name("Description"), Description("User name of this route."));
+/// Specifies the event ID that selects this route.
+CDI_GROUP_ENTRY(event, EventConfigEntry, //
+    Name("Route Event"),
+    Description("Receiving this event ID will move each turnout listed below to "
+                "its specified state. Turnouts not listed are left unchanged."));
+/// The sparse list of turnout actions for this route.
+CDI_GROUP_ENTRY(actions, RouteActionList, Name("Actions"),
+    Description("Turnouts to move when this route is selected."),
+    RepName("Action"));
+CDI_GROUP_END();
+
 /// Consumer class for a group of GPIO outputs that drive turnout motors. Each
 /// output is a single GPIO pin (for example driving a TC4428 that provides the
 /// differential outputs needed by a stall motor such as a Tortoise, or an MP10
@@ -148,7 +226,8 @@ CDI_GROUP_END();
 /// };
 /// openlcb::ConfiguredRoutedConsumer turnout_consumer(stack.node(),
 ///    kTurnoutGpio, ARRAYSIZE(kTurnoutGpio),
-///    cfg.seg().turnout_consumers(), cfg.seg().turnout_stagger_delay());
+///    cfg.seg().turnout_consumers(), cfg.seg().turnout_routes(),
+///    cfg.seg().turnout_stagger_delay());
 /// ```
 class ConfiguredRoutedConsumer : public ConfigUpdateListener,
                                  private SimpleEventHandler
@@ -156,12 +235,15 @@ class ConfiguredRoutedConsumer : public ConfigUpdateListener,
 public:
     typedef RoutedConsumerConfig config_entry_type;
 
-    /// Event type encoded in the low bits of the registry entry user_arg.
+    /// Event type encoded in the low bits of the registry entry user_arg. For
+    /// output events the upper bits hold the output index; for route-table
+    /// events the upper bits hold the route index.
     enum EventType
     {
-        EVENT_CLOSED = 0, //< individual close event
-        EVENT_THROWN = 1, //< individual throw event
-        EVENT_ROUTE = 2,  //< route (throw self, close group siblings) event
+        EVENT_CLOSED = 0,      //< individual close event
+        EVENT_THROWN = 1,      //< individual throw event
+        EVENT_ROUTE = 2,       //< route (throw self, close group siblings) event
+        EVENT_ROUTE_TABLE = 3, //< route-table event (applies a route's actions)
     };
 
     /// @param node is the OpenLCB node object from the stack.
@@ -170,21 +252,28 @@ public:
     /// @param size is the length of the list of pins array.
     /// @param config is the repeated group object from the configuration space
     /// that represents the locations of the events.
+    /// @param routes is the repeated group of route definitions from the
+    /// configuration space.
     /// @param stagger_delay is the configuration entry holding the movement
     /// stagger delay in units of 100 ms (clamped up to @ref
     /// ROUTED_MIN_STAGGER_DELAY).
-    template <unsigned N>
+    template <unsigned N, unsigned R>
     __attribute__((noinline)) ConfiguredRoutedConsumer(Node *node,
         const Gpio *const *pins, unsigned size,
         const RepeatedGroup<config_entry_type, N> &config,
+        const RepeatedGroup<RouteConfig, R> &routes,
         const Uint16ConfigEntry &stagger_delay)
         : node_(node)
         , pins_(pins)
         , size_(N)
+        , numRoutes_(R)
         , groups_(new uint8_t[N]())
         , desiredState_(new uint8_t[N]())
+        , routeTurnout_(new uint8_t[R * MAX_ROUTE_ACTIONS]())
+        , routeState_(new uint8_t[R * MAX_ROUTE_ACTIONS]())
         , timer_(this, node)
         , offset_(config)
+        , routeOffset_(routes)
         , delayOffset_(stagger_delay)
     {
         // Mismatched sizing of the GPIO array from the configuration array.
@@ -199,6 +288,8 @@ public:
         ConfigUpdateService::instance()->unregister_update_listener(this);
         delete[] groups_;
         delete[] desiredState_;
+        delete[] routeTurnout_;
+        delete[] routeState_;
     }
 
     UpdateAction apply_configuration(int fd, bool initial_load,
@@ -246,6 +337,25 @@ public:
             EventRegistry::instance()->register_handler(
                 EventRegistryEntry(this, cfg_route,
                     (i << 2) | EVENT_ROUTE), 0);
+        }
+
+        // Register each route's event and cache its actions so the event hot
+        // path never reads the configuration file.
+        RepeatedGroup<RouteConfig, UINT_MAX> route_ref(routeOffset_.offset());
+        for (unsigned r = 0; r < numRoutes_; ++r)
+        {
+            const RouteConfig route_cfg(route_ref.entry(r));
+            EventId route_event = route_cfg.event().read(fd);
+            EventRegistry::instance()->register_handler(
+                EventRegistryEntry(this, route_event,
+                    (r << 2) | EVENT_ROUTE_TABLE), 0);
+            for (unsigned k = 0; k < MAX_ROUTE_ACTIONS; ++k)
+            {
+                const RouteActionConfig action(route_cfg.actions().entry(k));
+                routeTurnout_[r * MAX_ROUTE_ACTIONS + k] =
+                    action.turnout().read(fd);
+                routeState_[r * MAX_ROUTE_ACTIONS + k] = action.state().read(fd);
+            }
         }
         priorityIndex_ = NO_PRIORITY;
         return REINIT_NEEDED; // Causes events identify.
@@ -339,6 +449,9 @@ public:
                 // siblings close.
                 priorityIndex_ = index;
                 break;
+            case EVENT_ROUTE_TABLE:
+                apply_route(index); // index is the route index here
+                break;
         }
 
         schedule_pending();
@@ -369,6 +482,52 @@ private:
     private:
         ConfiguredRoutedConsumer *parent_;
     };
+
+    /// Applies a route's cached actions to the desired-state array. Each action
+    /// with a valid turnout moves that turnout to its specified state; turnouts
+    /// not listed by the route are left unchanged. Route actions commit in
+    /// ascending output-index order (no priority output).
+    /// @param route index of the route to apply.
+    void apply_route(unsigned route)
+    {
+        for (unsigned k = 0; k < MAX_ROUTE_ACTIONS; ++k)
+        {
+            const uint8_t turnout = routeTurnout_[route * MAX_ROUTE_ACTIONS + k];
+            if (turnout == ROUTE_TURNOUT_NONE || turnout > size_)
+            {
+                continue; // unused slot or out-of-range turnout id
+            }
+            const unsigned pin = turnout - 1; // turnout ids are 1-based
+            desiredState_[pin] =
+                (routeState_[route * MAX_ROUTE_ACTIONS + k] == ROUTE_STATE_THROWN)
+                ? 1
+                : 0;
+        }
+    }
+
+    /// @return true if every turnout listed by @p route is already at the state
+    /// the route would set it to.
+    bool route_is_active(unsigned route) const
+    {
+        for (unsigned k = 0; k < MAX_ROUTE_ACTIONS; ++k)
+        {
+            const uint8_t turnout = routeTurnout_[route * MAX_ROUTE_ACTIONS + k];
+            if (turnout == ROUTE_TURNOUT_NONE || turnout > size_)
+            {
+                continue;
+            }
+            const unsigned pin = turnout - 1;
+            const uint8_t want =
+                (routeState_[route * MAX_ROUTE_ACTIONS + k] == ROUTE_STATE_THROWN)
+                ? 1
+                : 0;
+            if ((pins_[pin]->is_set() ? 1 : 0) != want)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
 
     /// @return true if output @p i still needs to move to reach its desired
     /// state.
@@ -467,11 +626,21 @@ private:
         Defs::MTI mti = Defs::MTI_CONSUMER_IDENTIFIED_VALID;
         const unsigned index = registry_entry.user_arg >> 2;
         const unsigned type = registry_entry.user_arg & 3;
-        const bool pin_set = pins_[index]->is_set();
-        // The event implies the pin should be set unless it is the CLOSED
-        // event.
-        const bool implies_set = (type != EVENT_CLOSED);
-        if (pin_set != implies_set)
+        bool valid;
+        if (type == EVENT_ROUTE_TABLE)
+        {
+            // A route event is VALID when every turnout it lists is already at
+            // the state the route would set (index is the route index here).
+            valid = route_is_active(index);
+        }
+        else
+        {
+            // The event implies the pin should be set unless it is the CLOSED
+            // event.
+            const bool implies_set = (type != EVENT_CLOSED);
+            valid = (pins_[index]->is_set() == implies_set);
+        }
+        if (!valid)
         {
             mti++; // INVALID
         }
@@ -490,11 +659,15 @@ private:
     Node *node_;              //< virtual node to export the consumer on
     const Gpio *const *pins_; //< array of all GPIO pins to use
     size_t size_;             //< number of GPIO pins to export
+    size_t numRoutes_;        //< number of routes in the route table
     uint8_t *groups_;         //< cached route group membership, one per output
     uint8_t *desiredState_;   //< desired state of each output (1 == THROWN)
+    uint8_t *routeTurnout_;   //< cached route action turnout ids [R*MAX_ACTIONS]
+    uint8_t *routeState_;     //< cached route action states [R*MAX_ACTIONS]
     StaggerTimer timer_;      //< drives staggered application of changes
     ConfigReference offset_;  //< Offset in the configuration space for our
     // configs.
+    ConfigReference routeOffset_;    //< Offset of the route table config.
     ConfigReference delayOffset_;    //< Offset of the stagger delay config.
     long long delayNsec_{0};         //< stagger delay in nanoseconds
     long long lastCommitTimeNsec_{0}; //< monotonic time of the last commit

@@ -95,6 +95,11 @@ using ExclusiveGroup4 = RepeatedGroup<ExclusiveConsumerConfig, 4>;
 /// route group selector plus closed/thrown/route events.
 using RoutedTurnouts = RepeatedGroup<RoutedConsumerConfig, 16>;
 
+/// Route table: eight routes, each mapping an event to a sparse list of turnout
+/// actions. Handles cascade yard ladders where turnouts off the chosen path are
+/// don't-care.
+using RouteTable = RepeatedGroup<RouteConfig, 8>;
+
 // As the IO expansion boards have different available capacities
 // we are updating this define to track number of MCPs instead of
 // expansion boards.
@@ -109,7 +114,7 @@ using Ext0PC = RepeatedGroup<PCConfig, 16 * NUM_MCPIOS>;
 
 /// Modify this value every time the EEPROM needs to be cleared on the node
 /// after an update.
-static constexpr uint16_t CANONICAL_VERSION = 0x11A8 + NUM_MCPIOS;
+static constexpr uint16_t CANONICAL_VERSION = 0x11A9 + NUM_MCPIOS;
 
 CDI_GROUP(NucleoGroup, Name("Nucleo peripherals"), Description("These are physically located on the nucleo CPU daughterboard."));
 CDI_GROUP_ENTRY(green_led, ConsumerConfig, Name("Nucleo user LED"), Description("Green led (LD2)."));
@@ -142,6 +147,12 @@ CDI_GROUP_ENTRY(routed_turnouts, RoutedTurnouts, Name("Routed turnout outputs"),
                 "individual CLOSED and THROWN events plus a route event that "
                 "throws it and closes all other turnouts in its route group."),
     RepName("Turnout"));
+CDI_GROUP_ENTRY(routed_routes, RouteTable, Name("Turnout routes"),
+    Description("Each route maps an event to a list of turnout positions. "
+                "Receiving the event moves every listed turnout to its state "
+                "and leaves all other turnouts unchanged, so a single button "
+                "can line a cascade yard ladder."),
+    RepName("Route"));
 #elif defined(PORTD_SNAP)
 CDI_GROUP_ENTRY(portde_consumers, PortDEConsumers, Name("Port E outputs"), Description("Line 1-4 is port E 5 - 8; offset due to Snap Switches"), RepName("Line"));
 #else

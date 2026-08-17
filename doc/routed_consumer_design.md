@@ -80,6 +80,49 @@ For output `i`:
 There is a single route event per output; it always throws self and closes
 siblings. There is no separate "route to closed" event.
 
+## Route tables (cascade ladders)
+
+The group model above fits a yard ladder where every turnout hangs off a single
+common track (each track has exactly one turnout on its path). The **most common**
+real ladder is a *cascade*: reaching a track requires an arbitrary pattern of
+turnout positions, and turnouts off the chosen path are **don't-care**. The
+group model cannot express don't-care, so a separate **route table** is provided
+alongside it (both coexist; individual CLOSED/THROWN events remain too).
+
+A route is a trigger event plus a **sparse list of `(turnout, state)` actions**.
+Firing the event moves each listed turnout to its state and leaves every other
+turnout unchanged — omission *is* the don't-care. This expresses cascade ladders,
+crossovers, and any arbitrary route.
+
+### CDI shape
+
+Modeled on the nested repeated-group pattern in
+`applications/dmx_controller/DmxSceneConfig.hxx` (whose "channel = 0 → change
+nothing" is the same sparse/omit idea):
+
+- `RouteActionConfig` = `turnout` (`Uint8`, dropdown `None` + `Turnout 1..16`) +
+  `state` (`Uint8`, dropdown `Closed`/`Thrown`). A slot with turnout `None` is
+  ignored.
+- `RouteConfig` = `description` (`StringConfigEntry<16>`) + `event`
+  (`EventConfigEntry`) + `actions`
+  (`RepeatedGroup<RouteActionConfig, MAX_ROUTE_ACTIONS>`).
+- `MAX_ROUTE_ACTIONS` (default 8) bounds how many turnouts one route may set;
+  raise it for deep cascades. Every route reserves this many slots, so it also
+  drives config size.
+
+### Semantics and reuse
+
+- `user_arg` reuses the spare low-2-bit `type` value **3** (`EVENT_ROUTE_TABLE`);
+  the upper bits hold the route index. Output events keep types 0/1/2.
+- Route actions are cached in RAM (`routeTurnout_[]`, `routeState_[]`) at
+  `apply_configuration`, bounds-checked against the pin count, so
+  `handle_event_report` never reads the config fd.
+- `apply_route()` writes the actions into `desiredState_[]` and the **existing
+  staggering engine** commits them in ascending output-index order (no priority
+  output for table routes) — current limiting applies unchanged.
+- Identify reports a route **VALID** iff every turnout it lists is already at its
+  target state, else INVALID.
+
 ## Staggered movement (current limiting)
 
 Switch machine motors draw current only while traveling (an MP10 pulls ~100 mA
@@ -174,11 +217,15 @@ Defining `PORTDE_ROUTED` in that target's `config.hxx` drives all 16 Port D/E
 outputs as routed turnouts:
 
 - `config.hxx` adds `using RoutedTurnouts = RepeatedGroup<RoutedConsumerConfig,
-  16>`, a `routed_stagger_delay` (`Uint16ConfigEntry`, default 10 = 1.0 s), and a
-  `routed_turnouts` CDI group entry.
+  16>`, a `routed_stagger_delay` (`Uint16ConfigEntry`, default 10 = 1.0 s), a
+  `routed_turnouts` CDI group entry, and a `routed_routes`
+  (`RepeatedGroup<RouteConfig, 8>`) route table.
 - `main.cxx` instantiates `openlcb::ConfiguredRoutedConsumer` over the 16
-  `PORTD_LINE*`/`PORTE_LINE*` outputs, passing both the repeated group and the
-  stagger-delay entry.
+  `PORTD_LINE*`/`PORTE_LINE*` outputs, passing the output group, the route
+  table, and the stagger-delay entry.
+- Enabling `PORTDE_ROUTED` raises the config to ~7150 bytes, so the target's
+  `CONFIG_FILE_SIZE` `static_assert` is 7300 when `PORTDE_ROUTED` is defined and
+  7000 otherwise (still ≥10% spare on the 8192-byte EEPROM).
 
 Because it consumes the same physical lines, `PORTDE_ROUTED` is mutually
 exclusive with `PORTD_EXCLUSIVE`, `PORTE_EXCLUSIVE`, and `PORTD_SNAP`; a
